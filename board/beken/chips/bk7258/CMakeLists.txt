@@ -1,1 +1,43 @@
- # BK7258 chip CMake integration placeholder.
+# SPDX-License-Identifier: Apache-2.0
+
+set(SRCS
+    bk7258_start.c
+    bk7258_vectors.c
+    bk7258_irq.c
+    bk7258_timerisr.c
+    bk7258_lowputc.c
+    bk7258_serial.c
+    bk7258_allocateheap.c)
+
+add_library(bk7258_chip OBJECT ${SRCS})
+add_dependencies(bk7258_chip nuttx_context)
+nuttx_add_library_internal(bk7258_chip)
+
+target_compile_options(
+  bk7258_chip
+  PRIVATE $<GENEX_EVAL:$<TARGET_PROPERTY:nuttx,NUTTX_KERNEL_COMPILE_OPTIONS>>
+          -mcpu=cortex-m33+nodsp -mthumb -mfpu=fpv5-sp-d16
+          -mfloat-abi=hard -mcmse)
+target_compile_definitions(
+  bk7258_chip
+  PRIVATE $<GENEX_EVAL:$<TARGET_PROPERTY:nuttx,NUTTX_KERNEL_DEFINITIONS>>)
+target_include_directories(
+  bk7258_chip
+  PRIVATE $<GENEX_EVAL:$<TARGET_PROPERTY:nuttx,NUTTX_KERNEL_INCLUDE_DIRECTORIES>>
+          ${NUTTX_CHIP_ABS_DIR}
+          ${NUTTX_CHIP_ABS_DIR}/include
+          ${NUTTX_CHIP_ABS_DIR}/include
+          ${NUTTX_CHIP_ABS_DIR}/hardware
+          ${CMAKE_SOURCE_DIR}/sched)
+target_link_libraries(bk7258_chip PRIVATE arch)
+
+if(TARGET nuttx)
+  add_dependencies(nuttx bk7258_chip)
+  target_link_libraries(nuttx PRIVATE $<TARGET_OBJECTS:bk7258_chip>)
+  target_link_options(nuttx PRIVATE "LINKER:--build-id=none"
+                      "LINKER:--entry=__start")
+endif()
+
+set_property(TARGET nuttx_target_interface APPEND PROPERTY ALL_TARGETS
+             bk7258_chip)
+file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/targets "bk7258_chip\n")

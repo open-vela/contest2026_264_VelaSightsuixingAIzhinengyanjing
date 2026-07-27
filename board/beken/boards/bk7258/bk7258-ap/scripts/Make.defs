@@ -1,1 +1,14 @@
- # BK7258 AP board linker Make definitions placeholder.
+# SPDX-License-Identifier: Apache-2.0
+
+include $(TOPDIR)/.config
+include $(TOPDIR)/tools/Config.mk
+include $(TOPDIR)/arch/arm/src/armv8-m/Toolchain.defs
+
+ARCHSCRIPT += $(BOARD_DIR)$(DELIM)scripts$(DELIM)ld.script
+
+CFLAGS := $(ARCHCFLAGS) $(ARCHOPTIMIZATION) $(ARCHCPUFLAGS) \
+          $(ARCHINCLUDES) $(ARCHDEFINES) $(EXTRAFLAGS) -pipe
+CXXFLAGS := $(ARCHCXXFLAGS) $(ARCHOPTIMIZATION) $(ARCHCPUFLAGS) \
+            $(ARCHXXINCLUDES) $(ARCHDEFINES) $(EXTRAFLAGS) -pipe
+CPPFLAGS := $(ARCHINCLUDES) $(ARCHDEFINES) $(EXTRAFLAGS)
+AFLAGS := $(CFLAGS) -D__ASSEMBLY__

@@ -1,1 +1,116 @@
-/* BK7258 AP linker script placeholder. */
+/* SPDX-License-Identifier: Apache-2.0 */
+
+OUTPUT_FORMAT("elf32-littlearm", "elf32-bigarm", "elf32-littlearm")
+OUTPUT_ARCH(arm)
+ENTRY(__start)
+
+MEMORY
+{
+  FLASH (rx)  : ORIGIN = 0x02150000, LENGTH = 0x00110000
+  RAM   (rwx) : ORIGIN = 0x28010000, LENGTH = 0x00054000
+}
+
+__ap_ram_start = ORIGIN(RAM);
+__ap_ram_end = ORIGIN(RAM) + LENGTH(RAM);
+
+SECTIONS
+{
+  .bk_boot_vectors ORIGIN(FLASH) : ALIGN(512)
+  {
+    KEEP(*(.bk_boot_vectors))
+  } > FLASH
+
+  .gnu.sgstubs : ALIGN(32)
+  {
+    KEEP(*(.gnu.sgstubs*))
+  } > FLASH
+
+  .text : ALIGN(4)
+  {
+    _stext = .;
+    KEEP(*(.start_text))
+    *(.text .text.*)
+    *(.rodata .rodata.*)
+    KEEP(*(.init))
+    KEEP(*(.fini))
+    _etext = .;
+  } > FLASH
+
+  .init_array : ALIGN(4)
+  {
+    __init_array_start = .;
+    KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+    KEEP(*(.init_array))
+    __init_array_end = .;
+  } > FLASH
+
+  .ARM.extab : ALIGN(4)
+  {
+    *(.ARM.extab* .gnu.linkonce.armextab.*)
+  } > FLASH
+
+  __exidx_start = .;
+  .ARM.exidx : ALIGN(4)
+  {
+    *(.ARM.exidx* .gnu.linkonce.armexidx.*)
+  } > FLASH
+  __exidx_end = .;
+
+  .data : ALIGN(8)
+  {
+    _sdata = .;
+    *(.data .data.* .sdata .sdata.*)
+    _edata = .;
+  } > RAM AT > FLASH
+  _eronly = LOADADDR(.data);
+
+  .ram_vectors : ALIGN(512)
+  {
+    __ram_vectors_start = .;
+    KEEP(*(.ram_vectors))
+    __ram_vectors_end = .;
+  } > RAM AT > FLASH
+  __ram_vectors_load = LOADADDR(.ram_vectors);
+
+  .bss (NOLOAD) : ALIGN(8)
+  {
+    _sbss = .;
+    *(.bss .bss.* .sbss .sbss.*)
+    *(COMMON)
+    _ebss = .;
+  } > RAM
+
+  .noinit (NOLOAD) : ALIGN(8)
+  {
+    *(.noinit .noinit.*)
+  } > RAM
+
+  .idle_stack (NOLOAD) : ALIGN(8)
+  {
+    __idle_stack_base = .;
+    . += 0x1000;
+    __idle_stack_top = .;
+  } > RAM
+
+  __heap_start = ALIGN(., 8);
+  __heap_end = __ap_ram_end;
+  _eram = __ap_ram_end;
+
+  /DISCARD/ :
+  {
+    *(.note .note.*)
+    *(.comment)
+  }
+
+  ASSERT(ADDR(.bk_boot_vectors) == ORIGIN(FLASH),
+         "AP boot vector is not at image offset zero")
+  ASSERT((ADDR(.bk_boot_vectors) & 0x1ff) == 0,
+         "AP boot vector is not 512-byte aligned")
+  ASSERT((ADDR(.ram_vectors) & 0x1ff) == 0,
+         "AP runtime vector is not 512-byte aligned")
+  ASSERT(SIZEOF(.bk_boot_vectors) >= 0x108,
+         "AP boot vector does not contain BK legacy magic")
+  ASSERT(_ebss <= __ap_ram_end, "AP bss overlaps CP RAM")
+  ASSERT(__heap_start < __heap_end, "AP heap is empty")
+  ASSERT(__heap_end <= __ap_ram_end, "AP heap overlaps CP RAM")
+}

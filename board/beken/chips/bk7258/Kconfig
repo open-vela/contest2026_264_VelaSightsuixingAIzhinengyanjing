@@ -1,1 +1,22 @@
- # BK7258 chip Kconfig placeholder.
+if ARCH_CHIP_CUSTOM
+
+comment "Beken BK7258 Configuration Options"
+
+config ARCH_CHIP_BK7258
+	bool "BK7258 AP"
+	default y
+	select ARCH_CORTEXM33
+	select ARCH_HAVE_CUSTOM_VECTORS
+	select ARCH_HAVE_FPU
+	select ARCH_HAVE_MPU
+	select ARM_HAVE_MPU_UNIFIED
+	select ARCH_HAVE_TRUSTZONE
+
+config BK7258_CPU_FREQ_HZ
+	int "CPU1 fixed frequency"
+	default 120000000
+	help
+		CPU1 frequency used by the SysTick lower-half during initial
+		bring-up. Runtime DVFS is intentionally unsupported.
+
+endif

@@ -1,11 +1,11 @@
 /****************************************************************************
- * vendor/beken/chips/bk7258/chip.h
+ * vendor/beken/chips/bk7258/include/chip.h
  *
  * SPDX-License-Identifier: Apache-2.0
  ****************************************************************************/
 
-#ifndef __VENDOR_BEKEN_CHIPS_BK7258_CHIP_H
-#define __VENDOR_BEKEN_CHIPS_BK7258_CHIP_H
+#ifndef __VENDOR_BEKEN_CHIPS_BK7258_INCLUDE_CHIP_H
+#define __VENDOR_BEKEN_CHIPS_BK7258_INCLUDE_CHIP_H
 
 #include <nuttx/config.h>
 #include <arch/irq.h>

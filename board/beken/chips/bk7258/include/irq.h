@@ -1,1 +1,48 @@
-/* BK7258 IRQ header placeholder. */
+/****************************************************************************
+ * vendor/beken/chips/bk7258/include/irq.h
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ ****************************************************************************/
+
+#ifndef __VENDOR_BEKEN_CHIPS_BK7258_INCLUDE_IRQ_H
+#define __VENDOR_BEKEN_CHIPS_BK7258_INCLUDE_IRQ_H
+
+#include <nuttx/config.h>
+#include <arch/chip/irq.h>
+
+#define BK7258_IRQ_RESERVED        0
+#define BK7258_IRQ_NMI             2
+#define BK7258_IRQ_HARDFAULT       3
+#define BK7258_IRQ_MEMFAULT        4
+#define BK7258_IRQ_BUSFAULT        5
+#define BK7258_IRQ_USAGEFAULT      6
+#define BK7258_IRQ_SECUREFAULT     7
+#define BK7258_IRQ_SVCALL          11
+#define BK7258_IRQ_DBGMONITOR      12
+#define BK7258_IRQ_PENDSV          14
+#define BK7258_IRQ_SYSTICK         15
+#define BK7258_IRQ_FIRST           16
+
+#define BK7258_EXTIRQ_TIMER0      3
+#define BK7258_EXTIRQ_UART0       4
+#define BK7258_EXTIRQ_TIMER1      13
+#define BK7258_EXTIRQ_UART1       15
+#define BK7258_EXTIRQ_UART2       16
+#define BK7258_EXTIRQ_MAILBOX     63
+#define BK7258_EXTIRQ_COUNT       64
+
+#define BK7258_IRQ_TIMER0          (BK7258_IRQ_FIRST + BK7258_EXTIRQ_TIMER0)
+#define BK7258_IRQ_UART0           (BK7258_IRQ_FIRST + BK7258_EXTIRQ_UART0)
+#define BK7258_IRQ_TIMER1          (BK7258_IRQ_FIRST + BK7258_EXTIRQ_TIMER1)
+#define BK7258_IRQ_UART1           (BK7258_IRQ_FIRST + BK7258_EXTIRQ_UART1)
+#define BK7258_IRQ_UART2           (BK7258_IRQ_FIRST + BK7258_EXTIRQ_UART2)
+#define BK7258_IRQ_MAILBOX         (BK7258_IRQ_FIRST + BK7258_EXTIRQ_MAILBOX)
+
+#define NR_IRQS                    (BK7258_IRQ_FIRST + BK7258_EXTIRQ_COUNT)
+
+#define NVIC_SYSH_PRIORITY_MIN     0xf0
+#define NVIC_SYSH_PRIORITY_DEFAULT 0x80
+#define NVIC_SYSH_PRIORITY_MAX     0x00
+#define NVIC_SYSH_PRIORITY_STEP    0x10
+
+#endif

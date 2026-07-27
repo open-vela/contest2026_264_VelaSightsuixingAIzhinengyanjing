@@ -1,1 +1,12 @@
- # BK7258 AP board Kconfig placeholder.
+if ARCH_BOARD_CUSTOM
+
+config ARCH_BOARD_BK7258_AP
+	bool "BK7258 AP board"
+	default y
+
+config BK7258_AP_UART1
+	bool "Use UART1 for the AP console"
+	default y
+	depends on SERIAL
+
+endif

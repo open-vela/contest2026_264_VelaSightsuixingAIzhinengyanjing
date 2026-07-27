@@ -1,1 +1,19 @@
- # BK7258 chip Make integration placeholder.
+# SPDX-License-Identifier: Apache-2.0
+
+include armv8-m/Make.defs
+
+LDFLAGS += -Wl,--entry=__start -Wl,--build-id=none
+
+CHIP_CSRCS = bk7258_start.c
+CHIP_CSRCS += bk7258_vectors.c
+CHIP_CSRCS += bk7258_irq.c
+CHIP_CSRCS += bk7258_timerisr.c
+CHIP_CSRCS += bk7258_lowputc.c
+CHIP_CSRCS += bk7258_serial.c
+CHIP_CSRCS += bk7258_allocateheap.c
+
+ARCHCPUFLAGS += -mcpu=cortex-m33+nodsp -mthumb
+ARCHCPUFLAGS += -mfpu=fpv5-sp-d16 -mfloat-abi=hard -mcmse
+ARCHINCLUDES += ${shell $(INCDIR) $(INCDIROPT) "$(CC)" $(CHIP_DIR)}
+ARCHINCLUDES += ${shell $(INCDIR) $(INCDIROPT) "$(CC)" $(CHIP_DIR)/include}
+ARCHINCLUDES += ${shell $(INCDIR) $(INCDIROPT) "$(CC)" $(CHIP_DIR)/hardware}
