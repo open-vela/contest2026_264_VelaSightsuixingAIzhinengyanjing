@@ -129,23 +129,19 @@ m -j8
 
 ### 5.1 同步CP日志桥接修改
 
-OpenVela AP日志通过Mailbox UART转发到Beken CP，再由CP物理UART0输出。CP源码位于外部`bk_avdk_smp`仓库，不复制进`board/beken/`；比赛仓通过补丁保存并复现必要修改：
+OpenVela AP日志通过Mailbox UART转发到Beken CP，再由CP物理UART0输出。CP源码位于外部`bk_avdk_smp`仓库，不复制进`board/beken/`；比赛仓保存当前已验证的完整文件：
 
 ```text
-patches/bk_avdk_smp/0001-cp-bridge-ap-mailbox-logs-to-uart0.patch
+external/bk_avdk_smp/cp/middleware/driver/common/driver.c
 ```
 
-该补丁面向`bk_avdk_smp`原厂基线提交`aa5df96`。在SDK根目录执行：
+从 `/home/mi/vela_competition` 工作区根目录执行：
 
 ```bash
-git apply --check \
-  ../contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/patches/bk_avdk_smp/0001-cp-bridge-ap-mailbox-logs-to-uart0.patch
-
-git apply \
-  ../contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/patches/bk_avdk_smp/0001-cp-bridge-ap-mailbox-logs-to-uart0.patch
+cp "contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp/cp/middleware/driver/common/driver.c" "bk_avdk_smp/cp/middleware/driver/common/driver.c"
 ```
 
-如果`git apply --check`失败，先检查`cp/middleware/driver/common/driver.c`是否已有`ap_uart0_log_init`，禁止重复应用。补丁细节和验证步骤见`patches/bk_avdk_smp/README.md`。
+覆盖前建议备份目标文件或检查 `bk_avdk_smp` 仓库的 `git diff`。完整文件版本和同步说明见 `external/bk_avdk_smp/README.md`。
 
 ## 6. 正确提交
 
