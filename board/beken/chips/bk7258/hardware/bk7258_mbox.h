@@ -19,6 +19,11 @@ typedef void (*bk7258_mbox_callback_t)(const bk7258_mbox_message_t *message);
 
 int bk7258_mbox_init(void);
 int bk7258_mbox_send(uint8_t destination, const uint32_t data[2]);
+int bk7258_mbox_send_message(uint8_t command, uint8_t logical_channel,
+                             uint32_t param1, uint32_t param2,
+                             uint32_t param3);
+
+int bk7258_mbox_uart_write(const uint8_t *data, uint16_t length);
 int bk7258_mbox_receive(bk7258_mbox_message_t *message);
 uint32_t bk7258_mbox_rx_status(void);
 void bk7258_mbox_set_callback(bk7258_mbox_callback_t callback);

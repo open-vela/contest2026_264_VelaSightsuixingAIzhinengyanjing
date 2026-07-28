@@ -14,6 +14,8 @@
 #define CHNL_CTRL_SYNC_TX 0x02u
 #define CHNL_CTRL_RESET 0x04u
 #define CHNL_STATE_COM_FAIL 0x01u
+#define CP_RAM_START 0x28064000u
+#define CP_RAM_END 0x2809f700u
 
 struct mb_header
 {
@@ -39,8 +41,8 @@ static void mailbox_rx(const bk7258_mbox_message_t *wire)
   uintptr_t address = wire->data[0];
 
   if (wire->src_cpu != 0 || wire->data[1] != sizeof(message) ||
-      (address & 31u) != 0 || address < 0x28010000u ||
-      address + sizeof(message) > 0x28064000u)
+      (address & 31u) != 0 || address < CP_RAM_START ||
+      address > CP_RAM_END - sizeof(message))
     {
       return;
     }

@@ -12,6 +12,8 @@
 #include "arm_internal.h"
 #include "hardware/bk7258_uart.h"
 
+int bk7258_mbox_uart_write(const uint8_t *data, uint16_t length);
+
 #ifndef CONFIG_UART1_RXBUFSIZE
 #  define CONFIG_UART1_RXBUFSIZE 256
 #endif
@@ -23,49 +25,20 @@ extern void bk7258_uart1_configure(void);
 
 static int bk7258_setup(struct uart_dev_s *dev)
 {
-  bk7258_uart1_configure();
   return OK;
 }
 
 static void bk7258_shutdown(struct uart_dev_s *dev)
 {
-  putreg32(0, BK7258_UART1_INT_ENABLE);
-}
-
-static int bk7258_interrupt(int irq, void *context, void *arg)
-{
-  struct uart_dev_s *dev = arg;
-  uint32_t status = getreg32(BK7258_UART1_INT_STATUS);
-
-  putreg32(status, BK7258_UART1_INT_STATUS);
-  if ((status & BK7258_UART_INT_RX) != 0)
-    {
-      uart_recvchars(dev);
-    }
-
-  if ((status & BK7258_UART_INT_TX) != 0)
-    {
-      uart_xmitchars(dev);
-    }
-
-  return OK;
 }
 
 static int bk7258_attach(struct uart_dev_s *dev)
 {
-  int ret = irq_attach(BK7258_IRQ_UART1, bk7258_interrupt, dev);
-  if (ret == OK)
-    {
-      up_enable_irq(BK7258_IRQ_UART1);
-    }
-
-  return ret;
+  return OK;
 }
 
 static void bk7258_detach(struct uart_dev_s *dev)
 {
-  up_disable_irq(BK7258_IRQ_UART1);
-  irq_detach(BK7258_IRQ_UART1);
 }
 
 static int bk7258_ioctl(struct file *filep, int cmd, unsigned long arg)
@@ -76,32 +49,25 @@ static int bk7258_ioctl(struct file *filep, int cmd, unsigned long arg)
 static int bk7258_receive(struct uart_dev_s *dev, unsigned int *status)
 {
   *status = 0;
-  return (getreg32(BK7258_UART1_FIFO_PORT) >> 8) & 0xff;
+  return -1;
 }
 
 static void bk7258_rxint(struct uart_dev_s *dev, bool enable)
 {
-  modifyreg32(BK7258_UART1_INT_ENABLE,
-              BK7258_UART_INT_RX,
-              enable ? BK7258_UART_INT_RX : 0);
 }
 
 static bool bk7258_rxavailable(struct uart_dev_s *dev)
 {
-  return (getreg32(BK7258_UART1_FIFO_STATUS) &
-          BK7258_UART_FIFO_RD_READY) != 0;
+  return false;
 }
 
 static void bk7258_send(struct uart_dev_s *dev, int ch)
 {
-  putreg32((uint8_t)ch, BK7258_UART1_FIFO_PORT);
+  (void)bk7258_mbox_uart_write((const uint8_t *)&ch, 1);
 }
 
 static void bk7258_txint(struct uart_dev_s *dev, bool enable)
 {
-  modifyreg32(BK7258_UART1_INT_ENABLE,
-              BK7258_UART_INT_TX,
-              enable ? BK7258_UART_INT_TX : 0);
   if (enable)
     {
       uart_xmitchars(dev);
@@ -110,13 +76,12 @@ static void bk7258_txint(struct uart_dev_s *dev, bool enable)
 
 static bool bk7258_txready(struct uart_dev_s *dev)
 {
-  return (getreg32(BK7258_UART1_FIFO_STATUS) &
-          BK7258_UART_FIFO_WR_READY) != 0;
+  return true;
 }
 
 static bool bk7258_txempty(struct uart_dev_s *dev)
 {
-  return (getreg32(BK7258_UART1_FIFO_STATUS) & BK7258_UART_TX_EMPTY) != 0;
+  return true;
 }
 
 static const struct uart_ops_s g_bk7258_uart_ops =

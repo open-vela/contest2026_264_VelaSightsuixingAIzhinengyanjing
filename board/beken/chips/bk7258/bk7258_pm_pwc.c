@@ -8,12 +8,14 @@
 
 #include <nuttx/semaphore.h>
 #include <nuttx/sched.h>
+#include <nuttx/signal.h>
 #include <nuttx/kthread.h>
 
 int bk7258_mailbox_init(void);
 int bk7258_mailbox_send_pwc(uint8_t command, uint32_t p1, uint32_t p2,
                             uint32_t p3);
 void bk7258_mailbox_set_pwc_rx(void (*callback)(const void *message));
+#include "hardware/bk7258_mbox.h"
 
 #define PM_CPU1_BOOT_READY_CMD 0x5u
 #define PM_QUEUE_DEPTH 8u
@@ -32,6 +34,22 @@ static volatile unsigned int g_tail;
 static sem_t g_pwc_sem;
 static volatile bool g_worker_ready;
 static volatile bool g_ready_sent;
+
+static int ipc_heartbeat_worker(int argc, char **argv)
+{
+  static uint32_t heartbeat_payload;
+
+  (void)argc;
+  (void)argv;
+  for (;;)
+    {
+      nxsig_usleep(2000000);
+      (void)bk7258_mbox_send_message(2, 0x10,
+                                     (uint32_t)(uintptr_t)&heartbeat_payload,
+                                     sizeof(heartbeat_payload), 0);
+    }
+  return 0;
+}
 
 static void pwc_rx(const void *raw)
 {
@@ -87,6 +105,17 @@ int bk7258_pwc_start(void)
   g_ready_sent = false;
   bk7258_mailbox_init();
   bk7258_mailbox_set_pwc_rx(pwc_rx);
+  /* Match Armino mb_ipc_heartbeat: notify CPU0 before PM ready and keep the
+   * CPU1 liveness indication independent from the PWC worker. */
+  if (bk7258_mbox_send_message(1, 0x10, 0, 0, 0) != 0)
+    {
+      return -1;
+    }
+  if (kthread_create("ipc-heartbeat", 100, 1536, ipc_heartbeat_worker,
+                     NULL) < 0)
+    {
+      return -1;
+    }
   pid = kthread_create("pwc", 110, 2048, pwc_worker, NULL);
   if (pid < 0)
     {
