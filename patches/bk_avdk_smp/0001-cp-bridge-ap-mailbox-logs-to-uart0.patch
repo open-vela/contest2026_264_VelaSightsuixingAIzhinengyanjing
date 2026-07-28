@@ -1,0 +1,103 @@
+diff --git a/cp/middleware/driver/common/driver.c b/cp/middleware/driver/common/driver.c
+index 6e2ef5f..6016a12 100755
+--- a/cp/middleware/driver/common/driver.c
++++ b/cp/middleware/driver/common/driver.c
+@@ -39,6 +39,87 @@
+ #include <driver/pwr_clk.h>
+ #include "bk_api_ipc.h"
+ 
++#if CONFIG_MAILBOX
++#include <driver/mb_uart_driver.h>
++#include <driver/mb_chnl_buff.h>
++
++static beken_semaphore_t s_ap_uart0_log_sem;
++static beken_thread_t s_ap_uart0_log_thread;
++static volatile uint32_t s_ap_uart0_log_write_fail;
++
++static void ap_uart0_log_rx(void *param)
++{
++	(void)param;
++	(void)rtos_set_semaphore(&s_ap_uart0_log_sem);
++}
++
++static void ap_uart0_log_task(beken_thread_arg_t arg)
++{
++	uint8_t buffer[MB_CHNL_BUFF_LEN];
++
++	(void)arg;
++	for (;;)
++	{
++		u16 length;
++
++		(void)rtos_get_semaphore(&s_ap_uart0_log_sem, BEKEN_WAIT_FOREVER);
++		do
++		{
++			length = bk_mb_uart_read(MB_UART0, buffer, sizeof(buffer));
++			if (length != 0)
++			{
++				if (bk_uart_write_bytes(UART_ID_0, buffer, length) != BK_OK)
++				{
++					s_ap_uart0_log_write_fail++;
++				}
++			}
++		} while (length != 0);
++	}
++}
++
++static bk_err_t ap_uart0_log_init(void)
++{
++	bk_err_t ret;
++
++	ret = rtos_init_semaphore(&s_ap_uart0_log_sem, 1);
++	if (ret != BK_OK)
++	{
++		return ret;
++	}
++
++	ret = rtos_create_thread(&s_ap_uart0_log_thread,
++					 BEKEN_DEFAULT_WORKER_PRIORITY,
++					 "ap_uart0_log", ap_uart0_log_task, 2048, NULL);
++	if (ret != BK_OK)
++	{
++		rtos_deinit_semaphore(&s_ap_uart0_log_sem);
++		return ret;
++	}
++
++	ret = bk_mb_uart_dev_init(MB_UART0);
++	if (ret != BK_OK)
++	{
++		rtos_delete_thread(&s_ap_uart0_log_thread);
++		rtos_deinit_semaphore(&s_ap_uart0_log_sem);
++		return ret;
++	}
++
++	ret = bk_mb_uart_register_rx_isr(MB_UART0, ap_uart0_log_rx, NULL);
++	if (ret != BK_OK)
++	{
++		bk_mb_uart_dev_deinit(MB_UART0);
++		rtos_delete_thread(&s_ap_uart0_log_thread);
++		rtos_deinit_semaphore(&s_ap_uart0_log_sem);
++		return ret;
++	}
++
++	/* Drain data that may have arrived between channel open and callback
++	 * registration. The binary semaphore intentionally coalesces wakeups. */
++	(void)rtos_set_semaphore(&s_ap_uart0_log_sem);
++	return BK_OK;
++}
++#endif
++
+ #if CONFIG_AON_PMU
+ #include "aon_pmu_driver.h"
+ #endif
+@@ -329,6 +410,10 @@ int driver_init(void) {
+ 	extern bk_err_t ipc_init(void);
+ 	extern bk_err_t mb_ipc_init(void);
+ 	ipc_init();
++	if (ap_uart0_log_init() != BK_OK)
++	{
++		return BK_FAIL;
++	}
+ #if CONFIG_MAILBOX_IPC
+ 	mb_ipc_init();
+ #endif
