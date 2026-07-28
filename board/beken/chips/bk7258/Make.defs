@@ -10,6 +10,9 @@ CHIP_CSRCS += bk7258_irq.c
 CHIP_CSRCS += bk7258_timerisr.c
 CHIP_CSRCS += bk7258_lowputc.c
 CHIP_CSRCS += bk7258_serial.c
+CHIP_CSRCS += bk7258_mbox0.c
+CHIP_CSRCS += bk7258_mailbox_channel.c
+CHIP_CSRCS += bk7258_pm_pwc.c
 CHIP_CSRCS += bk7258_allocateheap.c
 
 ARCHCPUFLAGS += -mcpu=cortex-m33+nodsp -mthumb

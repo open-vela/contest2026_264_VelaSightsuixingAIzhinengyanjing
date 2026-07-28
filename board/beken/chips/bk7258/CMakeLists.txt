@@ -7,6 +7,9 @@ set(SRCS
     bk7258_timerisr.c
     bk7258_lowputc.c
     bk7258_serial.c
+    bk7258_mbox0.c
+    bk7258_mailbox_channel.c
+    bk7258_pm_pwc.c
     bk7258_allocateheap.c)
 
 add_library(bk7258_chip OBJECT ${SRCS})

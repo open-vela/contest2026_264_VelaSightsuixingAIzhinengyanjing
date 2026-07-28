@@ -6,10 +6,11 @@
 
 #include "board.h"
 
+int bk7258_pwc_start(void);
+
 int bk7258_bringup(void)
 {
-  /* Do not send a partial AP-ready message before mailbox v2 is complete. */
-  return 0;
+  return bk7258_pwc_start();
 }
 
 void board_late_initialize(void)
