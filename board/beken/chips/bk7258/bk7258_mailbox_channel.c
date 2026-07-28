@@ -20,7 +20,11 @@
 #define MB_CHNL_PWC_TX     0x12u
 #define MB_CHNL_UART0_TX   0x19u
 #define MB_CHNL_PWC_RX     0x42u
+#define MB_CHNL_UART0_RX   0x49u
 #define MB_CHNL_RESET_CP_TX 0x40u
+
+#define MB_UART_SEND_DATA  0u
+#define MB_UART_SEND_STATE 1u
 
 #define CHNL_CTRL_ACK_BOX  0x01u
 #define CHNL_CTRL_SYNC_TX  0x02u
@@ -84,6 +88,7 @@ static bool g_phy_busy;
 static bool g_initialized;
 static bool g_serial_kick;
 static clock_t g_busy_since;
+static clock_t g_uart_retry_after;
 static struct mailbox_stats g_stats;
 static sem_t g_tx_sem;
 static void (*g_pwc_rx)(const struct mb_message *message);
@@ -122,6 +127,11 @@ static void uart_prepare(void)
   uint16_t first;
 
   if (channel->pending || g_uart_inflight != 0)
+    {
+      return;
+    }
+
+  if ((int32_t)(clock_systime_ticks() - g_uart_retry_after) < 0)
     {
       return;
     }
@@ -310,6 +320,7 @@ static void handle_ack(struct mb_message *message)
 {
   uint8_t logical_channel = message->header >> 24;
   uint8_t sequence = message->header >> 16;
+  bool uart_failed;
   unsigned int index;
 
   if ((message->header & ((uint32_t)CHNL_CTRL_RESET << 12)) != 0)
@@ -340,15 +351,23 @@ static void handle_ack(struct mb_message *message)
   g_channels[index].pending = false;
   if (g_active_channel == MB_CHNL_UART0_TX)
     {
-      if ((message->header & ((uint32_t)CHNL_STATE_COM_FAIL << 8)) != 0 ||
-          (message->param1 & 2u) != 0)
+      uart_failed =
+        (message->header & ((uint32_t)CHNL_STATE_COM_FAIL << 8)) != 0 ||
+        (message->param1 & 2u) != 0;
+      if (uart_failed)
         {
           g_stats.uart_tx_fail++;
+          g_uart_inflight = 0;
+          g_uart_retry_after = clock_systime_ticks() + TX_RETRY_INTERVAL;
+        }
+      else
+        {
+          g_uart_read = (g_uart_read + g_uart_inflight) % UART_TX_SIZE;
+          g_uart_inflight = 0;
+          g_uart_retry_after = 0;
+          g_serial_kick = true;
         }
 
-      g_uart_read = (g_uart_read + g_uart_inflight) % UART_TX_SIZE;
-      g_uart_inflight = 0;
-      g_serial_kick = true;
       nxsem_post(&g_tx_sem);
     }
 
@@ -384,11 +403,28 @@ static void mailbox_rx(const bk7258_mbox_message_t *wire)
       return;
     }
 
-  if (logical_channel != MB_CHNL_PWC_RX)
+  if (logical_channel != MB_CHNL_PWC_RX &&
+      logical_channel != MB_CHNL_UART0_RX)
     {
       g_stats.bad_envelope++;
       up_irq_restore(flags);
       return;
+    }
+
+  if (logical_channel == MB_CHNL_UART0_RX)
+    {
+      /* This port is output-only, but Armino initializes MB_UART0 by sending
+       * SEND_STATE from CP. Acknowledge its state/data commands with RTS
+       * deasserted so the CP endpoint reaches ready without enabling input. */
+      if ((message.header & 0xffu) != MB_UART_SEND_DATA &&
+          (message.header & 0xffu) != MB_UART_SEND_STATE)
+        {
+          message.header |= (uint32_t)CHNL_STATE_COM_FAIL << 8;
+        }
+
+      message.param1 = 0; /* uart_rts=0, uart_tx_fail=0 */
+      message.param2 = 0;
+      message.param3 = 0;
     }
 
   if ((control & CHNL_CTRL_SYNC_TX) == 0)
@@ -413,7 +449,7 @@ static void mailbox_rx(const bk7258_mbox_message_t *wire)
       message.header &= ~((uint32_t)CHNL_CTRL_ACK_BOX << 12);
     }
 
-  if (g_pwc_rx != NULL)
+  if (logical_channel == MB_CHNL_PWC_RX && g_pwc_rx != NULL)
     {
       g_pwc_rx(&message);
     }
@@ -439,6 +475,7 @@ int bk7258_mailbox_init(void)
   g_reset_wire[0] = 0;
   g_serial_kick = false;
   g_phy_busy = false;
+  g_uart_retry_after = 0;
   g_pwc_rx = NULL;
   g_initialized = false;
 
