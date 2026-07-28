@@ -6,7 +6,7 @@
 
 ```text
 contest2026_264_VelaSightsuixingAIzhinengyanjing/
-分支：dev
+分支：dev-ai-contest-2026
 ```
 
 BK7258 源码真实位置：
@@ -193,4 +193,4 @@ cd ~/vela_competition/contest/contest2026_264_VelaSightsuixingAIzhinengyanjing
 
 ### `repo sync` 后入口消失
 
-检查远端 manifest 是否已经引用包含 BK7258 `linkfile` 的 commit。仅在本地 `dev` 分支提交，不能保证其他工作区自动同步。
+检查远端 manifest 是否已经引用包含 BK7258 `linkfile` 的 commit。仅在本地 `dev-ai-contest-2026` 分支提交，不能保证其他工作区自动同步。
