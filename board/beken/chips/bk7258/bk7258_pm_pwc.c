@@ -10,6 +10,7 @@
 #include <nuttx/sched.h>
 #include <nuttx/signal.h>
 #include <nuttx/kthread.h>
+#include <nuttx/clock.h>
 
 int bk7258_mailbox_init(void);
 int bk7258_mailbox_send_pwc(uint8_t command, uint32_t p1, uint32_t p2,
@@ -32,6 +33,7 @@ static struct pwc_message g_queue[PM_QUEUE_DEPTH];
 static volatile unsigned int g_head;
 static volatile unsigned int g_tail;
 static sem_t g_pwc_sem;
+static sem_t g_worker_sem;
 static volatile bool g_worker_ready;
 static volatile bool g_ready_sent;
 
@@ -74,6 +76,7 @@ static int pwc_worker(int argc, char **argv)
   (void)argc;
   (void)argv;
   g_worker_ready = true;
+  nxsem_post(&g_worker_sem);
   for (;;)
     {
       struct pwc_message message;
@@ -99,11 +102,16 @@ int bk7258_pwc_start(void)
 {
   int pid;
   nxsem_init(&g_pwc_sem, 0, 0);
+  nxsem_init(&g_worker_sem, 0, 0);
   g_head = 0;
   g_tail = 0;
   g_worker_ready = false;
   g_ready_sent = false;
-  bk7258_mailbox_init();
+  pid = bk7258_mailbox_init();
+  if (pid < 0)
+    {
+      return pid;
+    }
   bk7258_mailbox_set_pwc_rx(pwc_rx);
   /* Match Armino mb_ipc_heartbeat: notify CPU0 before PM ready and keep the
    * CPU1 liveness indication independent from the PWC worker. */
@@ -121,9 +129,10 @@ int bk7258_pwc_start(void)
     {
       return pid;
     }
-  while (!g_worker_ready)
+  if (nxsem_tickwait_uninterruptible(&g_worker_sem, MSEC2TICK(200)) < 0 ||
+      !g_worker_ready)
     {
-      sched_yield();
+      return -ETIMEDOUT;
     }
   if (!g_ready_sent)
     {

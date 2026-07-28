@@ -24,8 +24,15 @@ int bk7258_mbox_send_message(uint8_t command, uint8_t logical_channel,
                              uint32_t param3);
 
 int bk7258_mbox_uart_write(const uint8_t *data, uint16_t length);
+bool bk7258_mbox_uart_txready(void);
+bool bk7258_mbox_uart_txempty(void);
 int bk7258_mbox_receive(bk7258_mbox_message_t *message);
 uint32_t bk7258_mbox_rx_status(void);
 void bk7258_mbox_set_callback(bk7258_mbox_callback_t callback);
+
+int bk7258_mailbox_init(void);
+int bk7258_mailbox_send_pwc(uint8_t command, uint32_t p1, uint32_t p2,
+                            uint32_t p3);
+void bk7258_mailbox_set_pwc_rx(void (*callback)(const void *message));
 
 #endif

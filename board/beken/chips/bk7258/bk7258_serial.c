@@ -10,9 +10,8 @@
 #include <nuttx/serial/serial.h>
 
 #include "arm_internal.h"
+#include "hardware/bk7258_mbox.h"
 #include "hardware/bk7258_uart.h"
-
-int bk7258_mbox_uart_write(const uint8_t *data, uint16_t length);
 
 #ifndef CONFIG_UART1_RXBUFSIZE
 #  define CONFIG_UART1_RXBUFSIZE 256
@@ -76,12 +75,12 @@ static void bk7258_txint(struct uart_dev_s *dev, bool enable)
 
 static bool bk7258_txready(struct uart_dev_s *dev)
 {
-  return true;
+  return bk7258_mbox_uart_txready();
 }
 
 static bool bk7258_txempty(struct uart_dev_s *dev)
 {
-  return true;
+  return bk7258_mbox_uart_txempty();
 }
 
 static const struct uart_ops_s g_bk7258_uart_ops =
@@ -118,6 +117,11 @@ static struct uart_dev_s g_bk7258_uart1 =
   },
   .ops = &g_bk7258_uart_ops,
 };
+
+void bk7258_serial_tx_available(void)
+{
+  uart_xmitchars(&g_bk7258_uart1);
+}
 
 void arm_earlyserialinit(void)
 {
