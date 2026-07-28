@@ -21,7 +21,6 @@
 #define MB_CHNL_UART0_TX   0x19u
 #define MB_CHNL_PWC_RX     0x42u
 #define MB_CHNL_UART0_RX   0x49u
-#define MB_CHNL_RESET_CP_TX 0x40u
 
 #define MB_UART_SEND_DATA  0u
 #define MB_UART_SEND_STATE 1u
@@ -75,9 +74,7 @@ static const uint8_t g_channel_ids[3] =
 static uint8_t g_uart_tx[UART_TX_SIZE];
 static uint8_t g_uart_xchg[UART_XCHG_SIZE] __attribute__((aligned(32)));
 static struct mb_message g_ack_message __attribute__((aligned(32)));
-static struct mb_message g_reset_message __attribute__((aligned(32)));
 static uint32_t g_ack_wire[2];
-static uint32_t g_reset_wire[2];
 static uint16_t g_uart_read;
 static uint16_t g_uart_write;
 static uint16_t g_uart_inflight;
@@ -187,11 +184,9 @@ static int dispatch_locked(void)
       return OK;
     }
 
-  if (g_ack_wire[0] != 0 || g_reset_wire[0] != 0)
+  if (g_ack_wire[0] != 0)
     {
-      uint32_t *control = g_ack_wire[0] != 0 ? g_ack_wire : g_reset_wire;
-
-      ret = bk7258_mbox_send(0, control);
+      ret = bk7258_mbox_send(0, g_ack_wire);
       if (ret < 0)
         {
           if (ret == -EAGAIN)
@@ -202,7 +197,7 @@ static int dispatch_locked(void)
           return ret;
         }
 
-      control[0] = 0;
+      g_ack_wire[0] = 0;
       g_stats.tx_count++;
     }
 
@@ -311,8 +306,11 @@ static bool valid_cp_message(const bk7258_mbox_message_t *wire,
                              uintptr_t *address)
 {
   *address = wire->data[0];
+  /* Armino's mbox0_adapter mailbox_buff is an array of 16-byte messages in
+   * CP .bss and is only word-aligned; 32-byte alignment is reserved for the
+   * separate exchange payload buffers. */
   return wire->src_cpu == 0 && wire->data[1] == sizeof(struct mb_message) &&
-         (*address & 31u) == 0 && *address >= CP_RAM_START &&
+         (*address & 3u) == 0 && *address >= CP_RAM_START &&
          *address <= CP_RAM_END - sizeof(struct mb_message);
 }
 
@@ -472,7 +470,6 @@ int bk7258_mailbox_init(void)
   g_uart_write = 0;
   g_uart_inflight = 0;
   g_ack_wire[0] = 0;
-  g_reset_wire[0] = 0;
   g_serial_kick = false;
   g_phy_busy = false;
   g_uart_retry_after = 0;
@@ -496,13 +493,6 @@ int bk7258_mailbox_init(void)
 
   g_initialized = true;
   g_serial_kick = true;
-
-  g_reset_message.header = (uint32_t)CHNL_CTRL_ACK_BOX << 12 |
-                           (uint32_t)CHNL_CTRL_RESET << 12 |
-                           (uint32_t)MB_CHNL_RESET_CP_TX << 24;
-  g_reset_wire[0] = (uint32_t)(uintptr_t)&g_reset_message;
-  g_reset_wire[1] = sizeof(g_reset_message);
-  (void)dispatch_locked();
   nxsem_post(&g_tx_sem);
   return OK;
 }
