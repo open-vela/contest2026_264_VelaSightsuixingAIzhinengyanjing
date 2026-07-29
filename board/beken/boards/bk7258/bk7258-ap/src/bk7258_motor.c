@@ -54,6 +54,11 @@ static int bk7258_motor_button_worker(int argc, char **argv)
       return fd;
     }
 
+  /* 当前 PWC 仅入队请求，不等待 CP 语义响应。PWM0 时钟门控由 CP 收到
+   * mailbox 命令后才打开，此处延时等待 CP 完成时钟使能，避免后续 PWM
+   * 寄存器写入因时钟未就绪而丢失。待 PWC worker 补上 ACK 消费后应改为
+   * 有界等待。
+   */
   nxsig_usleep(20000);
   fd = open("/dev/pwm0", O_RDWR);
   if (fd < 0)
