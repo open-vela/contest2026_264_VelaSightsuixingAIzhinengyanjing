@@ -1,6 +1,8 @@
 set(SRCS
     bk7258_boot.c
     bk7258_bringup.c
+    bk7258_buttons.c
+    bk7258_motor.c
     bk7258_appinit.c)
 
 target_sources(board PRIVATE ${SRCS})

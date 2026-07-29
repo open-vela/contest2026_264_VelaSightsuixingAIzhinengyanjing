@@ -5,6 +5,8 @@ set(SRCS
     bk7258_vectors.c
     bk7258_irq.c
     bk7258_timerisr.c
+    bk7258_gpio.c
+    bk7258_pwm.c
     bk7258_lowputc.c
     bk7258_serial.c
     bk7258_mbox0.c

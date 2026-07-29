@@ -3,10 +3,20 @@ if ARCH_BOARD_CUSTOM
 config ARCH_BOARD_BK7258_AP
 	bool "BK7258 AP board"
 	default y
+	select ARCH_HAVE_BUTTONS
 
 config BK7258_AP_UART1
 	bool "Use UART1 for the AP console"
 	default y
 	depends on SERIAL
+
+config BK7258_POWER_KEY_MOTOR
+	bool "Vibrate while the power key is pressed"
+	default n
+	depends on ARCH_BUTTONS && PWM
+	help
+		Poll the active-low GPIO12 power key using the Beken 5 ms/6 sample
+		debounce timing. Drive the vibration motor at 1 kHz and 70 percent
+		duty while the key is held, and stop it when the key is released.
 
 endif
