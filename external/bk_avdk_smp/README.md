@@ -1,11 +1,7 @@
 # Beken CP 已验证文件
 
-本目录保存已验证的 Beken CP 完整文件，对应当前已验证的 `bk_avdk_smp` commit `d203f9f`。
+本目录保存已验证的 Beken CP driver.c完整文件，此文件为支持AP与CP之间的通讯而修改。
 
-从 `/home/mi/vela_competition` 工作区根目录执行：
+将此目录中"bk_avdk_smp/cp/middleware/driver/common/driver.c"替换bk_avdk_smp工程中原有driver.c文件。
 
-```bash
-cp "contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp/cp/middleware/driver/common/driver.c" "bk_avdk_smp/cp/middleware/driver/common/driver.c"
-```
-
-覆盖前建议备份目标文件或检查 `bk_avdk_smp` 仓库的 `git diff`。
+覆盖前建议备份目标文件。

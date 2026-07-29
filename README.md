@@ -1,3 +1,55 @@
+# BK7258 OpenVela AP移植
+
+本项目将OpenVela/NuttX移植到BK7258 AP核，并保留博通原厂CP固件、Bootloader、分区和最终打包流程。当前已实现AP核启动，以及AP日志通过Mailbox转发到CP UART0输出。
+
+## 简单使用说明
+
+本项目需要配合博通`bk_avdk_smp` SMP工程使用：
+
+```text
+工作区/
+├── contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/
+└── bk_avdk_smp/
+```
+
+构建前，需要使用比赛仓中已验证的完整文件覆盖`bk_avdk_smp`原文件：
+
+```text
+external/bk_avdk_smp/cp/middleware/driver/common/driver.c
+  -> bk_avdk_smp/cp/middleware/driver/common/driver.c
+```
+
+从工作区根目录执行：
+
+```bash
+cp \
+  "contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp/cp/middleware/driver/common/driver.c" \
+  "bk_avdk_smp/cp/middleware/driver/common/driver.c"
+```
+
+覆盖前请备份原文件。详细OpenVela构建、CP构建和最终固件打包步骤见`github开发与构建指南.md`及`external/bk_avdk_smp/README.md`。
+
+## 主要目录
+
+```text
+board/beken/chips/bk7258/                  BK7258 AP启动、中断、定时器和Mailbox驱动
+board/beken/boards/bk7258/bk7258-ap/       BK7258 AP板级配置、链接脚本和bring-up
+external/bk_avdk_smp/                      已验证的博通CP覆盖文件
+logs/                                      AI Coding日志
+```
+
+## 已实现功能
+
+- BK7258物理CPU1/AP启动OpenVela/NuttX。
+- Cortex-M33启动向量、C运行时、MPU、FPU、IRQ和SysTick基础适配。
+- Mailbox v2基础传输、logical channel、sequence、ACK、超时和FIFO full恢复。
+- AP power-up indication、2秒heartbeat和PWC boot-ready握手。
+- AP日志通过Mailbox UART0转发到CP物理UART0。
+- AP、CP和Bootloader通过`bk_avdk_smp`标准打包流程生成`all-app.bin`。
+- 当前为CPU1单核bring-up，CPU2/AP SMP尚未启用。
+
+---
+
 # contest2026_264_VelaSightsuixingAIzhinengyanjing
 
 👋 欢迎参加 **2026 首届 openvela AI 硬件开发者大赛**！
