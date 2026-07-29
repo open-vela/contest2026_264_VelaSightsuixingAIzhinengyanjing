@@ -42,10 +42,40 @@
 #if CONFIG_MAILBOX
 #include <driver/mb_uart_driver.h>
 #include <driver/mb_chnl_buff.h>
+#include <components/shell_task.h>
+
+#define AP_UART0_LOG_LINE_SIZE 256
+#define AP_UART0_LOG_RETRY_MAX 3
+#define AP_UART0_LOG_RETRY_MS  10
+#define AP_UART0_LOG_FLUSH_MS  50
 
 static beken_semaphore_t s_ap_uart0_log_sem;
 static beken_thread_t s_ap_uart0_log_thread;
 static volatile uint32_t s_ap_uart0_log_write_fail;
+
+static void ap_uart0_log_output(const uint8_t *line, u16 length)
+{
+	static const uint8_t prefix[] = "ap0: ";
+	uint8_t output[sizeof(prefix) - 1 + AP_UART0_LOG_LINE_SIZE];
+	u16 output_length;
+	u8 retry;
+
+	memcpy(output, prefix, sizeof(prefix) - 1);
+	memcpy(output + sizeof(prefix) - 1, line, length);
+	output_length = sizeof(prefix) - 1 + length;
+
+	for (retry = 0; retry < AP_UART0_LOG_RETRY_MAX; retry++)
+	{
+		if (shell_log_raw_data(output, output_length))
+		{
+			return;
+		}
+
+		rtos_delay_milliseconds(AP_UART0_LOG_RETRY_MS);
+	}
+
+	s_ap_uart0_log_write_fail++;
+}
 
 static void ap_uart0_log_rx(void *param)
 {
@@ -55,25 +85,39 @@ static void ap_uart0_log_rx(void *param)
 
 static void ap_uart0_log_task(beken_thread_arg_t arg)
 {
-	uint8_t buffer[MB_CHNL_BUFF_LEN];
+	uint8_t input[MB_CHNL_BUFF_LEN];
+	uint8_t line[AP_UART0_LOG_LINE_SIZE];
+	u16 line_length = 0;
 
 	(void)arg;
 	for (;;)
 	{
-		u16 length;
+		u16 input_length;
+		u16 index;
+		bk_err_t ret;
 
-		(void)rtos_get_semaphore(&s_ap_uart0_log_sem, BEKEN_WAIT_FOREVER);
+		ret = rtos_get_semaphore(&s_ap_uart0_log_sem,
+						 line_length ? AP_UART0_LOG_FLUSH_MS : BEKEN_WAIT_FOREVER);
+		if (ret == kTimeoutErr)
+		{
+			ap_uart0_log_output(line, line_length);
+			line_length = 0;
+			continue;
+		}
+
 		do
 		{
-			length = bk_mb_uart_read(MB_UART0, buffer, sizeof(buffer));
-			if (length != 0)
+			input_length = bk_mb_uart_read(MB_UART0, input, sizeof(input));
+			for (index = 0; index < input_length; index++)
 			{
-				if (bk_uart_write_bytes(UART_ID_0, buffer, length) != BK_OK)
+				line[line_length++] = input[index];
+				if (input[index] == '\n' || line_length == sizeof(line))
 				{
-					s_ap_uart0_log_write_fail++;
+					ap_uart0_log_output(line, line_length);
+					line_length = 0;
 				}
 			}
-		} while (length != 0);
+		} while (input_length != 0);
 	}
 }
 

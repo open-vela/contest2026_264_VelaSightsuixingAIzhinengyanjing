@@ -331,9 +331,10 @@ static void handle_ack(struct mb_message *message)
 
   if (logical_channel != g_active_channel || sequence != g_active_seq)
     {
+      /* An ACK from a timed-out transmission may arrive after the same
+       * logical channel has already been retried with a new sequence. It is
+       * stale and must not release the current in-flight transaction. */
       g_stats.bad_ack++;
-      g_phy_busy = false;
-      (void)dispatch_locked();
       return;
     }
 
