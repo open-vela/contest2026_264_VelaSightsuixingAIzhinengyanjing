@@ -17,9 +17,14 @@ CHIP_CSRCS += bk7258_mbox0.c
 CHIP_CSRCS += bk7258_mailbox_channel.c
 CHIP_CSRCS += bk7258_pm_pwc.c
 CHIP_CSRCS += bk7258_allocateheap.c
+CHIP_CSRCS += bk7258_qspi.c
+CHIP_CSRCS += bk7258_gc9d01_gpio.c
 
 ARCHCPUFLAGS += -mcpu=cortex-m33+nodsp -mthumb
 ARCHCPUFLAGS += -mfpu=fpv5-sp-d16 -mfloat-abi=hard -mcmse
 ARCHINCLUDES += ${shell $(INCDIR) $(INCDIROPT) "$(CC)" $(CHIP_DIR)}
 ARCHINCLUDES += ${shell $(INCDIR) $(INCDIROPT) "$(CC)" $(CHIP_DIR)/include}
 ARCHINCLUDES += ${shell $(INCDIR) $(INCDIROPT) "$(CC)" $(CHIP_DIR)/hardware}
+
+CFLAGS += -I$(TOPDIR)/arch/arm/src/chip/include
+CFLAGS += -I$(TOPDIR)/arch/arm/src/chip/hardware

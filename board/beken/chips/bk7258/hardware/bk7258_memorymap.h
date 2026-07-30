@@ -21,6 +21,7 @@
 #define BK7258_AON_GPIO_BASE       0x44000400u
 #define BK7258_UART1_BASE          0x45830000u
 #define BK7258_MBOX0_BASE          0x41000000u
+#define BK7258_QSPI0_BASE          0x46040000u
 
 #define BK7258_NVIC_BASE           0xe000e100u
 #define BK7258_SCB_BASE            0xe000ed00u

@@ -5,7 +5,7 @@
 #include <nuttx/config.h>
 #include <stdint.h>
 
-#include "board.h"
+#include <arch/board/board.h>
 
 void board_early_initialize(void)
 {

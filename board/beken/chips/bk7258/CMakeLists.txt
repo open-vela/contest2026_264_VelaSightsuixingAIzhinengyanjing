@@ -13,7 +13,9 @@ set(SRCS
     bk7258_mbox0.c
     bk7258_mailbox_channel.c
     bk7258_pm_pwc.c
-    bk7258_allocateheap.c)
+    bk7258_allocateheap.c
+    bk7258_qspi.c
+    bk7258_gc9d01_gpio.c)
 
 add_library(bk7258_chip OBJECT ${SRCS})
 add_dependencies(bk7258_chip nuttx_context)

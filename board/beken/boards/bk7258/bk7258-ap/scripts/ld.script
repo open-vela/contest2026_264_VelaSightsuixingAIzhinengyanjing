@@ -4,6 +4,20 @@ OUTPUT_FORMAT("elf32-littlearm", "elf32-bigarm", "elf32-littlearm")
 OUTPUT_ARCH(arm)
 ENTRY(__start)
 
+/* g_bk7258_boot_vectors and _vectors (bk7258_vectors.c) are matched into
+ * the .bk_boot_vectors / .ram_vectors output sections below purely by
+ * input section name.  Nothing in the C code references either symbol
+ * directly, so without this EXTERN() the linker never has a reason to
+ * pull bk7258_vectors.o out of libarch.a in the first place: KEEP() only
+ * protects sections that are already part of the link from
+ * --gc-sections, it does not force extraction of an otherwise-unused
+ * static archive member.  Without this, both output sections silently
+ * come out empty (verified via nuttx.map) and the boot/runtime vector
+ * tables are missing at runtime, not just failing the size ASSERT below.
+ */
+EXTERN(g_bk7258_boot_vectors)
+EXTERN(_vectors)
+
 MEMORY
 {
   FLASH (rx)  : ORIGIN = 0x02150000, LENGTH = 0x00110000

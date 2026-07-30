@@ -18,3 +18,9 @@ out/
 *.elf
 *.hex
 *.map
+.depend
+*.dep
+BTdocs/
+notes/
+music.mp3
+music.flac

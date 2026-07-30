@@ -3,7 +3,8 @@ set(SRCS
     bk7258_bringup.c
     bk7258_buttons.c
     bk7258_motor.c
-    bk7258_appinit.c)
+    bk7258_appinit.c
+    bk7258_gc9d01.c)
 
 target_sources(board PRIVATE ${SRCS})
 target_include_directories(board PRIVATE
