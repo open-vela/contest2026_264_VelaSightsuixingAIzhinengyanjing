@@ -8,6 +8,7 @@ set(SRCS
     bk7258_gpio.c
     bk7258_pwm.c
     bk7258_lowputc.c
+    bk7258_syslog.c
     bk7258_serial.c
     bk7258_mbox0.c
     bk7258_mailbox_channel.c

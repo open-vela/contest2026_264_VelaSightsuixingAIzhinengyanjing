@@ -33,7 +33,10 @@
 #define CP_RAM_START       0x28064000u
 #define CP_RAM_END         0x2809f700u
 #define UART_XCHG_SIZE     128u
-#define UART_TX_SIZE       1024u
+#ifndef CONFIG_BK7258_MBOX_LOG_BUFSIZE
+#  define CONFIG_BK7258_MBOX_LOG_BUFSIZE 8192u
+#endif
+#define UART_TX_SIZE       CONFIG_BK7258_MBOX_LOG_BUFSIZE
 #define PHY_BUSY_TIMEOUT   MSEC2TICK(200)
 #define TX_RETRY_INTERVAL  MSEC2TICK(10)
 
@@ -61,14 +64,17 @@ struct mailbox_stats
   uint32_t bad_ack;
   uint32_t reset_count;
   uint32_t uart_drop;
+  uint32_t uart_drop_events;
   uint32_t uart_tx_fail;
+  uint32_t uart_write_calls;
+  uint32_t uart_write_bytes;
 };
 
 static struct logical_channel g_channels[3];
 static const uint8_t g_channel_ids[3] =
 {
-  MB_CHNL_HW_CTRL_TX,
   MB_CHNL_PWC_TX,
+  MB_CHNL_HW_CTRL_TX,
   MB_CHNL_UART0_TX
 };
 static uint8_t g_uart_tx[UART_TX_SIZE];
@@ -89,6 +95,11 @@ static clock_t g_uart_retry_after;
 static struct mailbox_stats g_stats;
 static sem_t g_tx_sem;
 static void (*g_pwc_rx)(const struct mb_message *message);
+
+void bk7258_mbox_uart_early_init(void)
+{
+  /* The BSS-backed ring is intentionally available before Mailbox init. */
+}
 
 extern void bk7258_serial_tx_available(void);
 
@@ -466,10 +477,7 @@ int bk7258_mailbox_init(void)
   int ret;
 
   memset(g_channels, 0, sizeof(g_channels));
-  memset(&g_stats, 0, sizeof(g_stats));
-  g_uart_read = 0;
-  g_uart_write = 0;
-  g_uart_inflight = 0;
+  /* Preserve syslog data queued before the Mailbox transport was ready. */
   g_ack_wire[0] = 0;
   g_serial_kick = false;
   g_phy_busy = false;
@@ -516,29 +524,67 @@ int bk7258_mbox_uart_write(const uint8_t *data, uint16_t length)
   irqstate_t flags;
   uint16_t written = 0;
 
-  if (data == NULL || length == 0 || !g_initialized)
+  if (data == NULL || length == 0)
     {
       return -EINVAL;
     }
 
   flags = up_irq_save();
-  while (written < length)
+  {
+    uint16_t free_space;
+    uint16_t first;
+
+    if (g_uart_write >= g_uart_read)
+      {
+        free_space = UART_TX_SIZE - (g_uart_write - g_uart_read) - 1u;
+      }
+    else
+      {
+        free_space = g_uart_read - g_uart_write - 1u;
+      }
+
+    if (length < free_space)
+      {
+        written = length;
+      }
+    else
+      {
+        written = free_space;
+      }
+
+    first = UART_TX_SIZE - g_uart_write;
+    if (first > written)
+      {
+        first = written;
+      }
+
+    memcpy(&g_uart_tx[g_uart_write], data, first);
+    if (first < written)
+      {
+        memcpy(g_uart_tx, data + first, written - first);
+      }
+
+    g_uart_write = (g_uart_write + written) % UART_TX_SIZE;
+    g_stats.uart_write_calls++;
+    g_stats.uart_write_bytes += written;
+
+    if (written < length)
+      {
+        g_stats.uart_drop += length - written;
+        g_stats.uart_drop_events++;
+      }
+  }
+
+  if (g_initialized)
     {
-      uint16_t next = (g_uart_write + 1u) % UART_TX_SIZE;
-      if (next == g_uart_read)
-        {
-          g_stats.uart_drop += length - written;
-          break;
-        }
-
-      g_uart_tx[g_uart_write] = data[written++];
-      g_uart_write = next;
+      uart_prepare();
+      (void)dispatch_locked();
     }
-
-  uart_prepare();
-  (void)dispatch_locked();
   up_irq_restore(flags);
-  nxsem_post(&g_tx_sem);
+  if (g_initialized)
+    {
+      nxsem_post(&g_tx_sem);
+    }
   return written == length ? OK : -ENOSPC;
 }
 

@@ -24,6 +24,7 @@ int bk7258_mbox_send_message(uint8_t command, uint8_t logical_channel,
                              uint32_t param3);
 
 int bk7258_mbox_uart_write(const uint8_t *data, uint16_t length);
+void bk7258_mbox_uart_early_init(void);
 bool bk7258_mbox_uart_txready(void);
 bool bk7258_mbox_uart_txempty(void);
 int bk7258_mbox_receive(bk7258_mbox_message_t *message);

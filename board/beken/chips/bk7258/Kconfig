@@ -19,4 +19,13 @@ config BK7258_CPU_FREQ_HZ
 		CPU1 frequency used by the SysTick lower-half during initial
 		bring-up. Runtime DVFS is intentionally unsupported.
 
+config BK7258_MBOX_LOG_BUFSIZE
+	int "AP Mailbox log buffer size"
+	default 8192
+	range 1024 32768
+	help
+		Static AP log buffer used before and after the Mailbox transport is
+		ready. Early logs are replayed through the existing CP MB_UART0
+		endpoint once transport initialization completes.
+
 endif

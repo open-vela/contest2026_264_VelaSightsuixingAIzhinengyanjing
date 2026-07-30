@@ -51,7 +51,41 @@ git branch --show-current
 git status --short --branch
 ```
 
-日常开发使用比赛仓的 `dev-ai-contest-2026` 或从该分支创建的功能分支。
+日常开发统一使用 `dev-ai-contest-2026` 分支。
+
+禁止以下做法：
+
+- 不要从 `dev-ai-contest-2026` 创建 feature 分支再发起 PR。
+- 不要使用 `feature/xxx` 等分支发起 PR。
+- 不要在 fork 仓库维护多个开发分支。
+
+统一分支的原因：
+
+- 仓库只允许 `Rebase and merge`，多个分支或重复历史会导致 rebase 冲突。
+- 使用单一分支可以让 PR 始终建立在目标分支之上。
+- 减少 merge commit 和重复提交，避免历史混乱。
+- 评委和协作者只需关注一个分支。
+
+日常操作：
+
+```bash
+cd ~/vela_competition/contest/contest2026_264_VelaSightsuixingAIzhinengyanjing
+
+# 切换到开发分支
+git switch dev-ai-contest-2026
+
+# 开始工作前拉取最新
+git pull --ff-only
+
+# 提交修改
+git add <files>
+git commit -m "<commit message>"
+
+# 推送到 fork
+git push fork dev-ai-contest-2026
+```
+
+如果 fork 分支历史已经混乱，参照第 9 节的方法整理分支历史，不要新建分支绕过问题。
 
 ## 4. 源码位置和 manifest 映射
 
@@ -98,52 +132,7 @@ ls -ld vendor/beken/chips/bk7258
 readlink vendor/beken/chips/bk7258
 ```
 
-## 5. 日常开发和构建
-
-编辑比赛仓中的源码：
-
-```text
-board/beken/chips/bk7258/
-board/beken/boards/bk7258/bk7258-ap/
-```
-
-BK7258 显式构建：
-
-```bash
-cd ~/vela_competition/contest
-source build/envsetup.sh
-lunch vendor/beken/boards/bk7258/bk7258-ap/configs/nsh
-m -j8
-```
-
-使用 CMake：
-
-```bash
-./build.sh \
-  vendor/beken/boards/bk7258/bk7258-ap/configs/nsh \
-  --cmake \
-  -j8
-```
-
-`lunch` 菜单只显示已注册的公共 vendorsetup 组合，不代表 BK7258 不存在。BK7258 使用上面的显式路径。
-
-### 5.1 同步CP日志桥接修改
-
-OpenVela AP日志通过Mailbox UART转发到Beken CP，再由CP物理UART0输出。CP源码位于外部`bk_avdk_smp`仓库，不复制进`board/beken/`；比赛仓保存当前已验证的完整文件：
-
-```text
-external/bk_avdk_smp/cp/middleware/driver/common/driver.c
-```
-
-从 `/home/mi/vela_competition` 工作区根目录执行：
-
-```bash
-cp "contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp/cp/middleware/driver/common/driver.c" "bk_avdk_smp/cp/middleware/driver/common/driver.c"
-```
-
-覆盖前建议备份目标文件或检查 `bk_avdk_smp` 仓库的 `git diff`。完整文件版本和同步说明见 `external/bk_avdk_smp/README.md`。
-
-## 6. 正确提交
+## 5. 正确提交
 
 ```bash
 cd ~/vela_competition/contest/contest2026_264_VelaSightsuixingAIzhinengyanjing
@@ -180,33 +169,7 @@ out/
 git push origin dev-ai-contest-2026
 ```
 
-## 7. 功能分支
-
-```bash
-git switch dev-ai-contest-2026
-git switch -c feature/bk7258-startup
-
-git status
-git diff --check
-git diff dev-ai-contest-2026...HEAD --stat
-```
-
-完成后合并回 `dev-ai-contest-2026`：
-
-```bash
-git switch dev-ai-contest-2026
-git merge --no-ff feature/bk7258-startup
-```
-
-不建议执行：
-
-```bash
-repo start dev-ai-contest-2026 --all
-```
-
-它会给所有公共仓库创建额外分支。
-
-## 8. 检查公共仓库
+## 6. 检查公共仓库
 
 ```bash
 cd ~/vela_competition/contest
@@ -222,7 +185,7 @@ git -C apps status
 - openvela 公共功能在对应公共仓库单独建分支、提交和发 PR。
 - 不要复制公共仓库文件到比赛仓来掩盖公共仓修改。
 
-## 9. 同步上游
+## 7. 同步上游
 
 同步前先检查：
 
@@ -245,7 +208,7 @@ git checkout -- .
 repo sync --force-sync
 ```
 
-## 10. 标签和日志
+## 8. 标签和日志
 
 阶段完成后可在比赛仓创建标签：
 
@@ -262,7 +225,77 @@ contest2026_264_VelaSightsuixingAIzhinengyanjing/logs/
 
 不要把日志放到 `.repo/`，也不要提交构建临时日志。
 
-## 11. 最终原则
+## 9. Fork PR 与分支历史整理
+
+本仓库只允许 `Rebase and merge`。如果 PR 分支包含 merge commit、重复历史或与目标分支分叉，GitHub 会提示：
+
+```text
+This branch cannot be rebased due to conflicts
+```
+
+这通常不是代码内容冲突，而是提交历史结构导致无法逐个 rebase。
+
+### 9.1 常见原因
+
+- fork 分支和 upstream 目标分支各自有一套内容相同但提交不同的历史。
+- 网页解决冲突时产生了 merge commit。
+- PR 分支长期未与目标分支同步。
+- 使用过多个分支（如 feature 分支）发起 PR。
+
+### 9.2 解决方法
+
+将 fork 分支重建为目标分支之上只保留有效新增提交：
+
+```bash
+cd ~/vela_competition/contest/contest2026_264_VelaSightsuixingAIzhinengyanjing
+
+# 确认远端最新
+git fetch --all --prune
+
+# 确认工作树干净
+git status --short --branch
+
+# 创建本地备份分支，保存当前完整历史
+git branch backup/dev-ai-contest-2026-before-rebase HEAD
+
+# 重置到目标分支最新提交
+git reset --hard openvela/dev-ai-contest-2026
+
+# 挑选需要保留的有效提交
+git cherry-pick <commit-hash>
+
+# 确认重建前后文件内容一致
+test "$(git rev-parse backup/dev-ai-contest-2026-before-rebase^{tree})" = "$(git rev-parse HEAD^{tree})"
+
+# 使用带 lease 的强制推送更新 fork 分支
+git push --force-with-lease=refs/heads/dev-ai-contest-2026:<旧commit-hash> fork dev-ai-contest-2026
+```
+
+推送后 PR 会自动更新为单个提交，`Rebase and merge` 即可使用。
+
+### 9.3 注意事项
+
+- `--force-with-lease` 会检查远端分支是否仍为预期旧版本，比直接 `--force` 更安全。
+- 重写历史前必须创建备份分支。
+- 重写后必须比较 tree 哈希，确认代码内容没有丢失。
+- 旧 PR 会因为源分支重写而自动关闭或失效，需要新建 PR。
+- 不要在网页上反复 `Accept incoming change`，如果代码内容本身没有冲突，应先整理分支历史。
+- 统一使用 `dev-ai-contest-2026` 分支开发和发起 PR，不要使用 feature 分支。
+
+### 9.4 验证 PR 是否可以合入
+
+```bash
+# 确认目标分支是 PR 分支的祖先
+git merge-base --is-ancestor openvela/dev-ai-contest-2026 dev-ai-contest-2026
+
+# 确认只有新增提交
+git rev-list --left-right --count openvela/dev-ai-contest-2026...dev-ai-contest-2026
+# 预期输出：0 1
+```
+
+如果输出为 `0 1`，表示目标分支没有独立提交，PR 分支只有一个新提交，可以直接 rebase 合入。
+
+## 10. 最终原则
 
 - 比赛仓是参赛代码的唯一提交仓库。
 - Git 管理比赛仓源码和 manifest；manifest 管理工作区映射。
@@ -270,3 +303,4 @@ contest2026_264_VelaSightsuixingAIzhinengyanjing/logs/
 - 每次提交前检查 `git diff --cached --name-only`。
 - 每个阶段完成后检查 `repo status`。
 - 公共仓库需要修改时，单独管理、单独提交、单独发 PR。
+- 统一使用 `dev-ai-contest-2026` 分支开发，不使用 feature 分支。

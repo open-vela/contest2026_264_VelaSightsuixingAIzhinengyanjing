@@ -17,6 +17,8 @@
 
 #include "hardware/bk7258_memorymap.h"
 
+int bk7258_syslog_initialize(void);
+
 extern const uint8_t _eronly[];
 extern uint8_t _sdata[];
 extern uint8_t _edata[];
@@ -101,6 +103,9 @@ bk7258_start(void)
   putreg32((uintptr_t)__ram_vectors_start, NVIC_VECTAB);
   UP_DSB();
   UP_ISB();
+
+  /* Install the buffered AP log channel before normal NuttX startup. */
+  (void)bk7258_syslog_initialize();
 
 #ifdef CONFIG_ARM_MPU
   mpu_reset();

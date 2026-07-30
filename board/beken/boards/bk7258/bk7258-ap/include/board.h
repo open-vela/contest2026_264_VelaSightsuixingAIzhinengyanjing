@@ -27,5 +27,6 @@
 #define BUTTON_VOLUME_DOWN_BIT     (1u << BUTTON_VOLUME_DOWN)
 
 int bk7258_bringup(void);
+uint32_t board_button_initialize(void);
 
 #endif

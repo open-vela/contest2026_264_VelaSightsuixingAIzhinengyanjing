@@ -12,11 +12,13 @@
 
 #include "board.h"
 
+#ifdef CONFIG_DEV_GPIO
 struct bk7258_button_gpio_s
 {
   struct gpio_dev_s gpio;
   uint8_t id;
 };
+#endif
 
 void bk7258_gpio_input_pullup(unsigned int pin);
 bool bk7258_gpio_read(unsigned int pin);
