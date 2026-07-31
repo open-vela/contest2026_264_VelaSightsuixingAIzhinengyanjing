@@ -12,7 +12,7 @@ projects/app_ab/partitions/bk7258/ram_regions.csv
   -> bk_avdk_smp/projects/app_ab/partitions/bk7258/ram_regions.csv
 ```
 
-`driver.c`包含 CP shell 队列串行化、AP 日志按行缓存、`ap0:`来源前缀、
+`driver.c`包含 CP shell 队列串行化和 AP 日志按行缓存，
 50 ms 半行刷新和队列提交失败有限重试。
 
 `ram_regions.csv`采用原厂 16 MB 七区域布局：OpenVela AP 管理四个媒体

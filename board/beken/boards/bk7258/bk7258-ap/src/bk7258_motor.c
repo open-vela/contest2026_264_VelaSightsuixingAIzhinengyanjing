@@ -75,7 +75,7 @@ static int bk7258_motor_button_worker(int argc, char **argv)
       return ret;
     }
 
-  printf("ap0: power-key motor worker ready, PWM parameters applied\n");
+  printf("power-key motor worker ready, PWM parameters applied\n");
 
   for (;;)
     {

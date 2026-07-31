@@ -104,14 +104,12 @@ static volatile uint32_t s_ap_uart0_log_write_fail;
 
 static void ap_uart0_log_output(const uint8_t *line, u16 length)
 {
-	static const uint8_t prefix[] = "ap0: ";
-	uint8_t output[sizeof(prefix) - 1 + AP_UART0_LOG_LINE_SIZE];
+	uint8_t output[AP_UART0_LOG_LINE_SIZE];
 	u16 output_length;
 	u8 retry;
 
-	memcpy(output, prefix, sizeof(prefix) - 1);
-	memcpy(output + sizeof(prefix) - 1, line, length);
-	output_length = sizeof(prefix) - 1 + length;
+	memcpy(output, line, length);
+	output_length = length;
 
 	for (retry = 0; retry < AP_UART0_LOG_RETRY_MAX; retry++)
 	{
