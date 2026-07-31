@@ -49,6 +49,24 @@ static volatile bool g_ready_sent;
 static volatile bool g_psram_power_waiting;
 static volatile uint32_t g_psram_power_state;
 
+static void psram_power_vote_rollback(void)
+{
+  int ret;
+
+  ret = bk7258_mailbox_send_pwc(PM_CTRL_PSRAM_POWER_CMD,
+                                PM_POWER_PSRAM_MODULE_CPU1,
+                                PM_POWER_MODULE_STATE_OFF, 0);
+  if (ret >= 0)
+    {
+      ret = bk7258_mailbox_wait_pwc(PM_TRANSPORT_TIMEOUT_MS);
+    }
+
+  if (ret < 0)
+    {
+      printf("PWC: PSRAM power vote rollback failed, error=%d\n", ret);
+    }
+}
+
 static int ipc_heartbeat_worker(int argc, char **argv)
 {
   static uint32_t heartbeat_payload;
@@ -99,8 +117,10 @@ static int pwc_worker(int argc, char **argv)
       switch (message.header & 0xffu)
         {
           case PM_CTRL_PSRAM_POWER_CMD:
-            /* Current AVDK SMP responds with the requested ON/OFF state in
-             * param1. It does not return the PSRAM driver error code.
+            /* The unmodified AVDK SMP firmware returns the requested ON/OFF
+             * state in param1. It does not expose the PSRAM driver result or
+             * detected capacity, so AP validates its configured regions with
+             * the non-destructive boundary probe before creating allocators.
              */
 
             g_psram_power_state = message.param1;
@@ -247,6 +267,7 @@ int bk7258_pwc_start(void)
       printf("PWC: PSRAM power response failed, error=%d state=%lu\n",
              ret, (unsigned long)g_psram_power_state);
       bk7258_mailbox_dump_stats();
+      psram_power_vote_rollback();
 #ifdef CONFIG_BK7258_PSRAM_REQUIRED
       return ret < 0 ? ret : -EIO;
 #endif
@@ -259,6 +280,7 @@ int bk7258_pwc_start(void)
         {
           printf("PWC: PSRAM allocator initialization failed, error=%d\n",
                  ret);
+          psram_power_vote_rollback();
 #ifdef CONFIG_BK7258_PSRAM_REQUIRED
           return ret;
 #endif

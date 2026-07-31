@@ -56,7 +56,11 @@ static const struct mpu_region_s g_bk7258_mpu_regions[] =
   {
     BK7258_PSRAM_BASE,
     BK7258_PSRAM_SIZE,
-    MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_INNER,
+    /* Match the BK7258 vendor AP mapping.  The PSRAM controller's normal,
+     * non-cacheable window is non-shareable on this interconnect.
+     */
+
+    MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_NO,
     MPU_RLAR_NONCACHEABLE
   },
 #endif

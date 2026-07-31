@@ -138,7 +138,7 @@ static void heap_info(struct bk7258_psram_heap_info *info,
 
 int bk7258_psram_initialize(void)
 {
-  unsigned int i;
+  unsigned int i = 0;
   int ret;
 
   nxmutex_lock(&g_psram_lock);
@@ -149,17 +149,17 @@ int bk7258_psram_initialize(void)
     }
 
   g_state = BK7258_PSRAM_PROBING;
+  printf("psram: probing configured region boundaries\n");
   ret = psram_probe();
   if (ret < 0)
     {
-      g_last_error = ret;
-      g_state = BK7258_PSRAM_FAILED;
-      nxmutex_unlock(&g_psram_lock);
-      return ret;
+      goto fail;
     }
 
+  printf("psram: boundary probe complete\n");
   for (i = 0; i < BK7258_PSRAM_POOL_COUNT; i++)
     {
+      printf("psram: initializing %s pool\n", g_pool_region[i].name);
       g_pool_heap[i] = mm_initialize(g_pool_region[i].name,
                                      (void *)g_pool_region[i].base,
                                      g_pool_region[i].size);
@@ -170,6 +170,7 @@ int bk7258_psram_initialize(void)
         }
     }
 
+  printf("psram: initializing AP heap\n");
   g_psram_heap = mm_initialize("bk7258-ap-psram",
                                (void *)BK7258_AP_PSRAM_HEAP_BASE,
                                BK7258_AP_PSRAM_HEAP_SIZE);
@@ -186,7 +187,7 @@ int bk7258_psram_initialize(void)
   return OK;
 
 fail:
-  while (i > 0)
+  while (i > 0 && i <= BK7258_PSRAM_POOL_COUNT)
     {
       i--;
       mm_uninitialize(g_pool_heap[i]);
@@ -246,6 +247,8 @@ void bk7258_psram_power_lost(void)
   nxmutex_lock(&g_psram_lock);
   g_psram_heap = NULL;
   memset(g_pool_heap, 0, sizeof(g_pool_heap));
+  g_heap_allocations = 0;
+  memset(g_pool_allocations, 0, sizeof(g_pool_allocations));
   g_generation++;
   g_last_error = -ENODEV;
   g_state = BK7258_PSRAM_FAILED;
