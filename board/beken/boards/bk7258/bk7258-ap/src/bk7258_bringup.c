@@ -21,20 +21,24 @@ int bk7258_bringup(void)
   int ret;
 
   board_button_initialize();
-  printf("ap0: buttons self-check ok\n");
   ret = bk7258_motor_setup();
   if (ret < 0)
     {
       return ret;
     }
-  printf("ap0: pwm motor self-check ok\n");
 
   ret = bk7258_pwc_start();
   if (ret < 0)
     {
       return ret;
     }
-  printf("ap0: mailbox/pwc self-check ok\n");
+
+  printf("ap0: buttons self-check ok\n");
+  printf("ap0: pwm motor self-check ok\n");
+  printf("ap0: mailbox/pwc/heartbeat self-check ok\n");
+#ifdef CONFIG_BK7258_PSRAM
+  printf("ap0: mpu PSRAM window configured (16 MB RW/XN)\n");
+#endif
 
   ret = bk7258_power_key_motor_start();
   if (ret < 0)

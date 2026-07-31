@@ -75,6 +75,8 @@ static int bk7258_motor_button_worker(int argc, char **argv)
       return ret;
     }
 
+  printf("ap0: power-key motor worker self-check ok\n");
+
   for (;;)
     {
       bool sample = (board_buttons() & BUTTON_POWER_BIT) != 0;
@@ -96,10 +98,8 @@ static int bk7258_motor_button_worker(int argc, char **argv)
           if (ioctl(fd, cmd, 0) < 0)
             {
               close(fd);
-      return -errno;
-    }
-
-  printf("ap0: power-key motor worker self-check ok\n");
+              return -errno;
+            }
 
           pressed = candidate;
         }

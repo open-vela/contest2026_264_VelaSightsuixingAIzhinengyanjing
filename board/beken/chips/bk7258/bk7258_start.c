@@ -8,7 +8,6 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include <stdio.h>
 
 #include <nuttx/init.h>
 
@@ -133,8 +132,7 @@ bk7258_start(void)
   mpu_initialize(g_bk7258_mpu_regions,
                  sizeof(g_bk7258_mpu_regions) /
                  sizeof(g_bk7258_mpu_regions[0]),
-                  false, true);
-  printf("ap0: mpu PSRAM window self-check ok (16 MB RW/XN)\n");
+                 false, true);
 #endif
 
 #ifdef USE_EARLYSERIALINIT
