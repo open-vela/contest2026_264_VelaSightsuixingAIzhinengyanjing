@@ -67,9 +67,11 @@ static uint8_t s_ap_uart0_rx_buff[AP_UART0_RX_BUF_SIZE];
 void ap_uart0_rx_forward(const uint8_t *data, uint16_t length)
 {
 	mailbox_data_t message;
+	bk_err_t send_ret;
 
 	if (data == NULL || length == 0 || length > AP_UART0_RX_BUF_SIZE)
 	{
+		BK_LOGI(NULL, "ap_uart0_rx_forward: reject len=%u\r\n", (unsigned int)length);
 		return;
 	}
 
@@ -80,7 +82,9 @@ void ap_uart0_rx_forward(const uint8_t *data, uint16_t length)
 	message.param2 = length;
 	message.param3 = 0;
 
-	(void)bk_mailbox_send(&message, MAILBOX_CPU1, MAILBOX_CPU0, NULL);
+	send_ret = bk_mailbox_send(&message, MAILBOX_CPU0, MAILBOX_CPU1, NULL);
+	BK_LOGI(NULL, "ap_uart0_rx_forward: len=%u ret=%d\r\n", (unsigned int)length,
+		(int)send_ret);
 }
 
 static beken_semaphore_t s_ap_uart0_log_sem;
