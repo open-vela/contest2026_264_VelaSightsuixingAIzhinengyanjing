@@ -13,6 +13,7 @@ set(SRCS
     bk7258_mbox0.c
     bk7258_mailbox_channel.c
     bk7258_pm_pwc.c
+    bk7258_psram_test.c
     bk7258_allocateheap.c
     bk7258_qspi.c
     bk7258_dma.c

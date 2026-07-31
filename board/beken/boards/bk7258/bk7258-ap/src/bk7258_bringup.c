@@ -9,6 +9,8 @@
 
 #include <arch/board/board.h>
 
+#include "bk7258_psram_test.h"
+
 int bk7258_pwc_start(void);
 int bk7258_motor_setup(void);
 int bk7258_power_key_motor_start(void);
@@ -31,6 +33,14 @@ int bk7258_bringup(void)
     {
       return ret;
     }
+
+#ifdef CONFIG_BK7258_PSRAM_TEST
+  ret = bk7258_psram_test(0, NULL);
+  if (ret < 0)
+    {
+      return ret;
+    }
+#endif
 
   ret = bk7258_power_key_motor_start();
   if (ret < 0)

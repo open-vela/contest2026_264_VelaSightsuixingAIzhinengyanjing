@@ -28,4 +28,27 @@ config BK7258_MBOX_LOG_BUFSIZE
 		ready. Early logs are replayed through the existing CP MB_UART0
 		endpoint once transport initialization completes.
 
+config BK7258_PSRAM
+	bool "BK7258 CP-managed PSRAM"
+	default n
+	help
+		Map the CP-initialized 16 MB PSRAM window for OpenVela. The AP does
+		not initialize the PSRAM PHY and this option does not add PSRAM to
+		the NuttX system heap.
+
+config BK7258_PSRAM_SIZE
+	hex "BK7258 PSRAM capacity"
+	default 0x01000000
+	depends on BK7258_PSRAM
+	help
+		Physical PSRAM capacity required by the validated app_ab layout.
+
+config BK7258_PSRAM_TEST
+	bool "Run BK7258 PSRAM boundary test at boot"
+	default n
+	depends on BK7258_PSRAM
+	help
+		Run a non-destructive save, pattern, read-back and restore test on
+		the AP-owned PSRAM regions. The CP-owned 128 KiB heap is skipped.
+
 endif

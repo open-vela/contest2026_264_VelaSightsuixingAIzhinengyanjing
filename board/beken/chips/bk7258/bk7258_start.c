@@ -16,6 +16,12 @@
 #include "nvic.h"
 
 #include "hardware/bk7258_memorymap.h"
+#include "hardware/bk7258_psram.h"
+
+#if defined(CONFIG_BK7258_PSRAM) && \
+    CONFIG_BK7258_PSRAM_SIZE != BK7258_PSRAM_SIZE
+#  error "BK7258 OpenVela and app_ab PSRAM capacities differ"
+#endif
 
 int bk7258_syslog_initialize(void);
 
@@ -46,6 +52,14 @@ static const struct mpu_region_s g_bk7258_mpu_regions[] =
     MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_INNER,
     MPU_RLAR_NONCACHEABLE
   },
+#ifdef CONFIG_BK7258_PSRAM
+  {
+    BK7258_PSRAM_BASE,
+    BK7258_PSRAM_SIZE,
+    MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_INNER,
+    MPU_RLAR_NONCACHEABLE
+  },
+#endif
   {
     0x40000000u,
     0x20000000u,
