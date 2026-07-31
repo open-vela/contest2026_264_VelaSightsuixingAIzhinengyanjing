@@ -43,6 +43,7 @@
 #include <driver/mb_uart_driver.h>
 #include <driver/mb_chnl_buff.h>
 #include <driver/mailbox_channel.h>
+#include "mailbox_driver_base.h"
 #include <components/shell_task.h>
 
 #define AP_UART0_LOG_LINE_SIZE 256
