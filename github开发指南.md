@@ -69,36 +69,61 @@ git status --short --branch
 日常操作：
 
 ```bash
-cd ~/vela/vela_competition/contest/contest2026_264_VelaSightsuixingAIzhinengyanjing
+cd ~/vela_competition/contest/contest2026_264_VelaSightsuixingAIzhinengyanjing
 
 # 切换到开发分支
 git switch dev-ai-contest-2026
 
-# 开始工作前，必须先同步上游最新（见第 3.1 节）
-git fetch openvela
+# 开始工作前，必须按第 3.1 节的完整流程同步 upstream 和 fork
+git fetch --all --prune
+git status --short --branch
 git rebase openvela/dev-ai-contest-2026
 
 # 提交修改
 git add <files>
 git commit -m "<commit message>"
 
-# 推送前，必须验证分支状态（见第 3.2 节）
+# 推送前，必须按第 3.2 节验证并更新 fork
 git rev-list --left-right --count openvela/dev-ai-contest-2026...HEAD
-
-# 推送到 fork
-git push fork dev-ai-contest-2026
+git push --force-with-lease=refs/heads/dev-ai-contest-2026:<fetch前记录的fork旧commit> \
+  fork dev-ai-contest-2026
 ```
 
 如果 fork 分支历史已经混乱，参照第 9 节的方法整理分支历史，不要新建分支绕过问题。
 
 ### 3.1 开发前必须同步上游
 
-每次开始新的开发工作前，必须先获取上游最新提交并 rebase：
+每次开始新的开发工作前，必须先确认本地修改已提交或已安全暂存，再同时获取 upstream 和 fork 的最新引用：
 
 ```bash
-git fetch openvela
+git fetch --all --prune
+git status --short --branch
+git rev-parse --verify openvela/dev-ai-contest-2026
+git rev-parse --verify fork/dev-ai-contest-2026
+```
+
+如果工作区有本次任务的未提交修改，不能直接 rebase。优先先提交；如果修改尚未完成，使用带说明的 stash 保存：
+
+```bash
+git stash push -m "wip: <简短说明>"
+git rebase openvela/dev-ai-contest-2026
+git stash pop
+```
+
+然后检查当前分支和 upstream 的关系：
+
+```bash
+git rev-list --left-right --count openvela/dev-ai-contest-2026...HEAD
+```
+
+左值不为 `0` 时必须先 rebase。同步 upstream 只能使用：
+
+```bash
 git rebase openvela/dev-ai-contest-2026
 ```
+
+禁止把 fork 当作 upstream，也禁止使用 `git pull`、`git pull --ff-only` 或
+`git merge fork/dev-ai-contest-2026` 同步。fork 只是推送目标，upstream 才是 PR 的目标基线。
 
 禁止以下做法：
 
@@ -127,15 +152,35 @@ git rebase --continue
 rebase 完成后，如果 fork 远端有旧历史，需要强制推送：
 
 ```bash
-git push --force-with-lease fork dev-ai-contest-2026
+git push --force-with-lease=refs/heads/dev-ai-contest-2026:<fetch前记录的fork旧commit> \
+  fork dev-ai-contest-2026
+```
+
+如果 rebase 过程中提示 `skipped previously applied commit`，说明该提交的补丁已经
+包含在 upstream 中，不要使用 `--reapply-cherry-picks`，继续完成 rebase 即可。
+
+如果 GitHub 显示 `This branch has conflicts that must be resolved`，且提示
+`Discard 1 commit to make this branch match the upstream repository`，通常是 fork
+中存在一个与 upstream 内容相同但 commit hash 不同的重复提交。不要在网页上点击
+`Discard`，也不要创建 feature 分支。执行第 9.2 节的历史重建流程，或在确认是重复
+提交后执行：
+
+```bash
+git rebase --skip
 ```
 
 ### 3.2 推送前必须验证分支状态
 
-推送前必须确认分支相对于上游是线性的：
+推送前必须确认工作区、暂存区、提交历史和 fork 远端都正确。以下命令必须按顺序执行：
 
 ```bash
+git status --short --branch
+git diff --check
+git diff --cached --name-only
 git rev-list --left-right --count openvela/dev-ai-contest-2026...HEAD
+git merge-base --is-ancestor openvela/dev-ai-contest-2026 HEAD
+git fetch fork
+git rev-parse fork/dev-ai-contest-2026
 ```
 
 期望输出：
@@ -151,7 +196,25 @@ git rev-list --left-right --count openvela/dev-ai-contest-2026...HEAD
 
 如果左边不为 0，说明还没同步上游，必须先 rebase。
 
+如果 `git merge-base --is-ancestor` 返回非零，当前分支不是 upstream 之上的线性历史，
+必须停止推送并按第 9 节重建。
+
 如果 N 过大或包含与上游重复的提交，应检查并清理历史，只保留真正新增的提交。
+确认暂存文件只来自比赛仓后，再使用带 lease 的强制推送：
+
+```bash
+git push --force-with-lease=refs/heads/dev-ai-contest-2026:<fetch前记录的fork旧commit> \
+  fork dev-ai-contest-2026
+```
+
+推送后必须重新获取 fork 并确认本地与 fork 完全一致：
+
+```bash
+git fetch fork
+git rev-list --left-right --count fork/dev-ai-contest-2026...HEAD
+```
+
+期望输出为 `0 0`。如果不是 `0 0`，不得继续创建或更新 PR。
 
 ## 4. 源码位置和 manifest 映射
 
@@ -208,7 +271,7 @@ git diff --check
 
 git add board/beken
 git add contest2026_264_VelaSightsuixingAIzhinengyanjing.xml
-git add git教程.md
+git add github开发指南.md
 
 git diff --cached --name-only
 git commit -m "feat: complete BK7258 porting milestone"
@@ -363,11 +426,13 @@ git cherry-pick <commit-hash>
 # 确认重建前后文件内容一致
 test "$(git rev-parse backup/dev-ai-contest-2026-before-rebase^{tree})" = "$(git rev-parse HEAD^{tree})"
 
-# 使用带 lease 的强制推送更新 fork 分支
-git push --force-with-lease=refs/heads/dev-ai-contest-2026:<旧commit-hash> fork dev-ai-contest-2026
+# 使用带 lease 的强制推送更新 fork 分支。旧 commit 必须来自本次
+# git fetch --all --prune 之后记录的 fork/dev-ai-contest-2026。
+git push --force-with-lease=refs/heads/dev-ai-contest-2026:<fetch前记录的fork旧commit> \
+  fork dev-ai-contest-2026
 ```
 
-推送后 PR 会自动更新为单个提交，`Rebase and merge` 即可使用。
+推送后 PR 会自动更新为 upstream 之上的线性提交序列，`Rebase and merge` 即可使用。
 
 ### 9.3 注意事项
 
@@ -384,12 +449,13 @@ git push --force-with-lease=refs/heads/dev-ai-contest-2026:<旧commit-hash> fork
 # 确认目标分支是 PR 分支的祖先
 git merge-base --is-ancestor openvela/dev-ai-contest-2026 dev-ai-contest-2026
 
-# 确认只有新增提交
+# 确认只有基于 upstream 的新增提交
 git rev-list --left-right --count openvela/dev-ai-contest-2026...dev-ai-contest-2026
-# 预期输出：0 1
+# 预期输出：0 N，N 为本地真正新增的提交数
 ```
 
-如果输出为 `0 1`，表示目标分支没有独立提交，PR 分支只有一个新提交，可以直接 rebase 合入。
+如果输出为 `0 N`，且 `N` 只包含本次真正新增的提交，可以直接创建或更新 PR。
+如果左值不为 `0`、出现 merge commit 或 N 包含重复提交，必须先整理历史，不能直接推送。
 
 ## 10. 最终原则
 
@@ -404,3 +470,6 @@ git rev-list --left-right --count openvela/dev-ai-contest-2026...dev-ai-contest-
 - 禁止使用 `git merge` 同步上游，只能使用 `git rebase`，避免产生 merge commit 导致 `Rebase and merge` 失败。
 - 不要在 fork 中保留与上游内容重复的提交；rebase 时遇到重复提交应使用 `git rebase --skip` 跳过。
 - 推送前必须验证 `git rev-list --left-right --count openvela/dev-ai-contest-2026...HEAD` 输出为 `0 N`，确保不落后上游。
+- 每次推送前必须 `git fetch --all --prune`，记录 fork 旧 commit，并使用带明确 lease 的 `git push --force-with-lease`。
+- 推送后必须验证 `git rev-list --left-right --count fork/dev-ai-contest-2026...HEAD` 输出为 `0 0`。
+- GitHub 提示 `Discard 1 commit` 时，先判断是否为重复提交，禁止直接点击网页 `Discard` 或创建 feature 分支绕过。
