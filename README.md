@@ -17,6 +17,9 @@
 ```text
 external/bk_avdk_smp/cp/middleware/driver/common/driver.c
   -> bk_avdk_smp/cp/middleware/driver/common/driver.c
+
+external/bk_avdk_smp/cp/components/bk_cli/shell_task.c
+  -> bk_avdk_smp/cp/components/bk_cli/shell_task.c
 ```
 
 从工作区根目录执行：
@@ -25,6 +28,10 @@ external/bk_avdk_smp/cp/middleware/driver/common/driver.c
 cp \
   "contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp/cp/middleware/driver/common/driver.c" \
   "bk_avdk_smp/cp/middleware/driver/common/driver.c"
+
+cp \
+  "contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp/cp/components/bk_cli/shell_task.c" \
+  "bk_avdk_smp/cp/components/bk_cli/shell_task.c"
 ```
 
 覆盖前请备份原文件。详细OpenVela构建、CP构建和最终固件打包步骤见`github开发与构建指南.md`及`external/bk_avdk_smp/README.md`。
