@@ -47,8 +47,18 @@ static int bk7258_ioctl(struct file *filep, int cmd, unsigned long arg)
 
 static int bk7258_receive(struct uart_dev_s *dev, unsigned int *status)
 {
+  int ch;
+
   *status = 0;
-  return -1;
+
+  if (dev->recv.head == dev->recv.tail)
+    {
+      return -1;
+    }
+
+  ch = (unsigned char)dev->recv.buffer[dev->recv.head];
+  dev->recv.head = (dev->recv.head + 1) % dev->recv.size;
+  return ch;
 }
 
 static void bk7258_rxint(struct uart_dev_s *dev, bool enable)
@@ -57,7 +67,7 @@ static void bk7258_rxint(struct uart_dev_s *dev, bool enable)
 
 static bool bk7258_rxavailable(struct uart_dev_s *dev)
 {
-  return false;
+  return dev->recv.head != dev->recv.tail;
 }
 
 static void bk7258_send(struct uart_dev_s *dev, int ch)
@@ -121,6 +131,28 @@ static struct uart_dev_s g_bk7258_uart1 =
 void bk7258_serial_tx_available(void)
 {
   uart_xmitchars(&g_bk7258_uart1);
+}
+
+void bk7258_serial_rx_push(const uint8_t *data, uint16_t length)
+{
+  uint16_t i;
+  sbuf_size_t next_tail;
+
+  for (i = 0; i < length; i++)
+    {
+      next_tail = (g_bk7258_uart1.recv.tail + 1) % g_bk7258_uart1.recv.size;
+      if (next_tail == g_bk7258_uart1.recv.head)
+        {
+          /* Buffer full: drop the remaining bytes rather than overwrite
+           * unread data or block the mailbox RX path. */
+          break;
+        }
+
+      g_bk7258_uart1.recv.buffer[g_bk7258_uart1.recv.tail] = (char)data[i];
+      g_bk7258_uart1.recv.tail = next_tail;
+    }
+
+  uart_recvchars(&g_bk7258_uart1);
 }
 
 void arm_earlyserialinit(void)
