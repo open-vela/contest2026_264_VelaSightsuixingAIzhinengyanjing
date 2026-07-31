@@ -178,13 +178,13 @@ int bk7258_gc9d01_test(int argc, char **argv)
 {
   size_t i;
 
-  printf("gc9d01: hardware reset\n");
+  printf("gc9d01 smoke: hardware reset started\n");
   bk7258_gc9d01_hw_reset();
 
-  printf("gc9d01: qspi0 init\n");
+  printf("gc9d01 smoke: QSPI0 configured\n");
   bk7258_qspi0_init();
 
-  printf("gc9d01: sending %u init commands (through sleep out)\n",
+  printf("gc9d01 smoke: sending %u init commands (through sleep out)\n",
          (unsigned int)GC9D01_PRE_SLEEP_OUT_CMD_COUNT);
   for (i = 0; i < GC9D01_PRE_SLEEP_OUT_CMD_COUNT; i++)
     {
@@ -199,20 +199,20 @@ int bk7258_gc9d01_test(int argc, char **argv)
         }
     }
 
-  printf("gc9d01: sleep-out settle delay (%u ms)\n",
+  printf("gc9d01 smoke: sleep-out settle delay (%u ms)\n",
          GC9D01_SLEEP_OUT_DELAY_MS);
   up_udelay(GC9D01_SLEEP_OUT_DELAY_MS * 1000u);
 
-  printf("gc9d01: display on\n");
+  printf("gc9d01 smoke: sending display-on command\n");
   if (!bk7258_qspi0_send_cmd(g_gc9d01_display_on.cmd,
-                             g_gc9d01_display_on.data,
-                             g_gc9d01_display_on.data_len))
+                              g_gc9d01_display_on.data,
+                              g_gc9d01_display_on.data_len))
     {
       printf("gc9d01: qspi0 timed out waiting for display-on cmd to "
              "complete\n");
       return -1;
     }
 
-  printf("gc9d01: init sequence completed without hang\n");
+  printf("gc9d01 smoke: command sequence returned\n");
   return 0;
 }

@@ -18,9 +18,10 @@ int bk7258_camera_initialize(void);
 
 int bk7258_bringup(void)
 {
+  uint32_t button_count;
   int ret;
 
-  board_button_initialize();
+  button_count = board_button_initialize();
   ret = bk7258_motor_setup();
   if (ret < 0)
     {
@@ -33,11 +34,15 @@ int bk7258_bringup(void)
       return ret;
     }
 
-  printf("ap0: buttons self-check ok\n");
-  printf("ap0: pwm motor self-check ok\n");
-  printf("ap0: mailbox/pwc/heartbeat self-check ok\n");
+  printf("ap0: button GPIOs configured, count=%lu\n",
+         (unsigned long)button_count);
+  printf("ap0: PWM device registered at /dev/pwm0\n");
+  printf("ap0: mailbox transport and PWC worker ready\n");
+  printf("ap0: heartbeat worker started, interval=2000 ms\n");
+  printf("ap0: CPU1 boot-ready message queued to CP\n");
 #ifdef CONFIG_BK7258_PSRAM
-  printf("ap0: mpu PSRAM window configured (16 MB RW/XN)\n");
+  printf("ap0: PSRAM MPU window configured, base=0x60000000 "
+         "size=0x01000000 RW/XN/non-cacheable\n");
 #endif
 
   ret = bk7258_power_key_motor_start();
@@ -51,13 +56,15 @@ int bk7258_bringup(void)
 
 void board_late_initialize(void)
 {
-  if (bk7258_bringup() < 0)
+  int ret = bk7258_bringup();
+
+  if (ret < 0)
     {
-      printf("ap0: bring-up self-check failed\n");
+      printf("ap0: board bring-up stopped, error=%d\n", ret);
       return;
     }
 
-  printf("ap0: bring-up self-check ok\n");
+  printf("ap0: board bring-up initialization completed\n");
 
   /* GC9D01 QSPI panel bring-up smoke test.  board_app_finalinitialize()
    * (BOARDIOC_FINALINIT) is never invoked in this minimal, apps-less NSH
