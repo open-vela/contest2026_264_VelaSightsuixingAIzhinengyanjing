@@ -11,6 +11,7 @@
 #include <nuttx/signal.h>
 #include <nuttx/kthread.h>
 #include <nuttx/clock.h>
+#include <stdio.h>
 
 int bk7258_mailbox_init(void);
 int bk7258_mailbox_send_pwc(uint8_t command, uint32_t p1, uint32_t p2,
@@ -138,5 +139,11 @@ int bk7258_pwc_start(void)
     {
       g_ready_sent = bk7258_mailbox_send_pwc(PM_CPU1_BOOT_READY_CMD, 1, 0, 0) == 0;
     }
-  return g_ready_sent ? 0 : -1;
+  if (g_ready_sent)
+    {
+      printf("ap0: cpu1 ready/heartbeat self-check ok\n");
+      return 0;
+    }
+
+  return -1;
 }

@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 
 #include <nuttx/clock.h>
 #include <nuttx/irq.h>
@@ -532,6 +533,7 @@ int bk7258_mailbox_init(void)
   g_initialized = true;
   g_serial_kick = true;
   nxsem_post(&g_tx_sem);
+  printf("ap0: mailbox transport self-check ok\n");
   return OK;
 }
 

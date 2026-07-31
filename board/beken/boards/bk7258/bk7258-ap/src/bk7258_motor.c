@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -95,8 +96,10 @@ static int bk7258_motor_button_worker(int argc, char **argv)
           if (ioctl(fd, cmd, 0) < 0)
             {
               close(fd);
-              return -errno;
-            }
+      return -errno;
+    }
+
+  printf("ap0: power-key motor worker self-check ok\n");
 
           pressed = candidate;
         }

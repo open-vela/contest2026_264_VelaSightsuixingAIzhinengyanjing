@@ -4,6 +4,7 @@
 
 #include <nuttx/config.h>
 #include <stddef.h>
+#include <stdio.h>
 
 #include <nuttx/board.h>
 
@@ -20,17 +21,20 @@ int bk7258_bringup(void)
   int ret;
 
   board_button_initialize();
+  printf("ap0: buttons self-check ok\n");
   ret = bk7258_motor_setup();
   if (ret < 0)
     {
       return ret;
     }
+  printf("ap0: pwm motor self-check ok\n");
 
   ret = bk7258_pwc_start();
   if (ret < 0)
     {
       return ret;
     }
+  printf("ap0: mailbox/pwc self-check ok\n");
 
   ret = bk7258_power_key_motor_start();
   if (ret < 0)
@@ -43,7 +47,13 @@ int bk7258_bringup(void)
 
 void board_late_initialize(void)
 {
-  (void)bk7258_bringup();
+  if (bk7258_bringup() < 0)
+    {
+      printf("ap0: bring-up self-check failed\n");
+      return;
+    }
+
+  printf("ap0: bring-up self-check ok\n");
 
   /* GC9D01 QSPI panel bring-up smoke test.  board_app_finalinitialize()
    * (BOARDIOC_FINALINIT) is never invoked in this minimal, apps-less NSH
