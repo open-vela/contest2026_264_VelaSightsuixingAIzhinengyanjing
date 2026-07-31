@@ -69,23 +69,89 @@ git status --short --branch
 日常操作：
 
 ```bash
-cd ~/vela_competition/contest/contest2026_264_VelaSightsuixingAIzhinengyanjing
+cd ~/vela/vela_competition/contest/contest2026_264_VelaSightsuixingAIzhinengyanjing
 
 # 切换到开发分支
 git switch dev-ai-contest-2026
 
-# 开始工作前拉取最新
-git pull --ff-only
+# 开始工作前，必须先同步上游最新（见第 3.1 节）
+git fetch openvela
+git rebase openvela/dev-ai-contest-2026
 
 # 提交修改
 git add <files>
 git commit -m "<commit message>"
+
+# 推送前，必须验证分支状态（见第 3.2 节）
+git rev-list --left-right --count openvela/dev-ai-contest-2026...HEAD
 
 # 推送到 fork
 git push fork dev-ai-contest-2026
 ```
 
 如果 fork 分支历史已经混乱，参照第 9 节的方法整理分支历史，不要新建分支绕过问题。
+
+### 3.1 开发前必须同步上游
+
+每次开始新的开发工作前，必须先获取上游最新提交并 rebase：
+
+```bash
+git fetch openvela
+git rebase openvela/dev-ai-contest-2026
+```
+
+禁止以下做法：
+
+- 不要在旧的上游基线上直接开发，否则会与上游新增提交形成分叉。
+- 不要使用 `git merge openvela/dev-ai-contest-2026` 同步上游，这会产生 merge commit，导致 GitHub 的 `Rebase and merge` 无法使用。
+- 不要使用 `git pull` 或 `git pull --ff-only` 替代 rebase，因为它们只同步 fork 远端，不同步上游。
+
+如果 rebase 时出现冲突，说明上游可能已经包含了相同修改。此时应：
+
+```bash
+# 查看冲突文件
+git status
+
+# 如果上游已经包含相同功能，选择上游版本
+git checkout --theirs <冲突文件>
+git add <冲突文件>
+
+# 跳过当前重复提交
+git rebase --skip
+
+# 如果是真正的新增修改，解决冲突后继续
+git add <冲突文件>
+git rebase --continue
+```
+
+rebase 完成后，如果 fork 远端有旧历史，需要强制推送：
+
+```bash
+git push --force-with-lease fork dev-ai-contest-2026
+```
+
+### 3.2 推送前必须验证分支状态
+
+推送前必须确认分支相对于上游是线性的：
+
+```bash
+git rev-list --left-right --count openvela/dev-ai-contest-2026...HEAD
+```
+
+期望输出：
+
+```text
+0  N
+```
+
+含义：
+
+- 左边 `0`：不落后上游，没有缺少上游提交。
+- 右边 `N`：有 N 个新增提交。
+
+如果左边不为 0，说明还没同步上游，必须先 rebase。
+
+如果 N 过大或包含与上游重复的提交，应检查并清理历史，只保留真正新增的提交。
 
 ## 4. 源码位置和 manifest 映射
 
@@ -187,6 +253,8 @@ git -C apps status
 
 ## 7. 同步上游
 
+### 7.1 公共仓库同步
+
 同步前先检查：
 
 ```bash
@@ -207,6 +275,34 @@ git reset --hard
 git checkout -- .
 repo sync --force-sync
 ```
+
+### 7.2 比赛仓同步上游
+
+比赛仓的 fork 分支必须定期与上游 `open-vela` 保持同步。同步时只能使用 rebase，不能使用 merge：
+
+```bash
+cd ~/vela_competition/contest/contest2026_264_VelaSightsuixingAIzhinengyanjing
+
+# 获取上游最新
+git fetch openvela
+
+# 确认工作区干净
+git status --short
+
+# rebase 到上游最新
+git rebase openvela/dev-ai-contest-2026
+
+# 如果有冲突，按第 3.1 节处理
+
+# 推送到 fork
+git push --force-with-lease fork dev-ai-contest-2026
+```
+
+禁止以下做法：
+
+- 不要使用 `git merge openvela/dev-ai-contest-2026`，会产生 merge commit，导致 GitHub 的 `Rebase and merge` 失败。
+- 不要在 fork 网页上点击 `Sync fork` 后直接使用 `Merge` 方式同步。
+- 不要在 fork 中保留与上游内容重复的提交。
 
 ## 8. 标签和日志
 
@@ -304,3 +400,7 @@ git rev-list --left-right --count openvela/dev-ai-contest-2026...dev-ai-contest-
 - 每个阶段完成后检查 `repo status`。
 - 公共仓库需要修改时，单独管理、单独提交、单独发 PR。
 - 统一使用 `dev-ai-contest-2026` 分支开发，不使用 feature 分支。
+- 每次开发前必须 `git fetch openvela` 并 `git rebase openvela/dev-ai-contest-2026`，确保基于上游最新提交开发。
+- 禁止使用 `git merge` 同步上游，只能使用 `git rebase`，避免产生 merge commit 导致 `Rebase and merge` 失败。
+- 不要在 fork 中保留与上游内容重复的提交；rebase 时遇到重复提交应使用 `git rebase --skip` 跳过。
+- 推送前必须验证 `git rev-list --left-right --count openvela/dev-ai-contest-2026...HEAD` 输出为 `0 N`，确保不落后上游。
