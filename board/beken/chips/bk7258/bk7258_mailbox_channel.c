@@ -313,6 +313,13 @@ static int queue_message(uint8_t logical_channel, uint8_t command,
   return ret == -EAGAIN ? OK : ret;
 }
 
+static bool address_in_cp_ram(uintptr_t address, uint32_t length)
+{
+  return (address & 3u) == 0 && address >= CP_RAM_START &&
+         length > 0 && length <= CP_RAM_END - CP_RAM_START &&
+         address <= CP_RAM_END - length;
+}
+
 static bool valid_cp_message(const bk7258_mbox_message_t *wire,
                              uintptr_t *address)
 {
@@ -321,8 +328,7 @@ static bool valid_cp_message(const bk7258_mbox_message_t *wire,
    * CP .bss and is only word-aligned; 32-byte alignment is reserved for the
    * separate exchange payload buffers. */
   return wire->src_cpu == 0 && wire->data[1] == sizeof(struct mb_message) &&
-         (*address & 3u) == 0 && *address >= CP_RAM_START &&
-         *address <= CP_RAM_END - sizeof(struct mb_message);
+         address_in_cp_ram(*address, sizeof(struct mb_message));
 }
 
 static void handle_ack(struct mb_message *message)
@@ -423,11 +429,26 @@ static void mailbox_rx(const bk7258_mbox_message_t *wire)
 
   if (logical_channel == MB_CHNL_UART0_RX)
     {
-      /* This port is output-only, but Armino initializes MB_UART0 by sending
-       * SEND_STATE from CP. Acknowledge its state/data commands with RTS
-       * deasserted so the CP endpoint reaches ready without enabling input. */
-      if ((message.header & 0xffu) != MB_UART_SEND_DATA &&
-          (message.header & 0xffu) != MB_UART_SEND_STATE)
+      /* CP forwards raw keypresses from the physical UART0 CLI input path
+       * (bk_avdk_smp cp/components/bk_cli/shell_task.c's
+       * ap_uart0_rx_forward()) using the same address+length envelope
+       * convention as the existing AP->CP UART0 TX direction: param1 is the
+       * address of a CP-RAM buffer holding the raw bytes, param2 is the
+       * byte count. Armino also initializes MB_UART0 by sending SEND_STATE
+       * from CP with no payload; both cases are acknowledged with RTS
+       * deasserted so the CP endpoint reaches ready. */
+      if ((message.header & 0xffu) == MB_UART_SEND_DATA &&
+          message.param1 != 0 && message.param2 != 0 &&
+          address_in_cp_ram(message.param1, message.param2) &&
+          message.param2 <= UART_XCHG_SIZE)
+        {
+          extern void bk7258_serial_rx_push(const uint8_t *data,
+                                             uint16_t length);
+          bk7258_serial_rx_push((const uint8_t *)message.param1,
+                                 (uint16_t)message.param2);
+        }
+      else if ((message.header & 0xffu) != MB_UART_SEND_DATA &&
+               (message.header & 0xffu) != MB_UART_SEND_STATE)
         {
           message.header |= (uint32_t)CHNL_STATE_COM_FAIL << 8;
         }
