@@ -43,12 +43,4 @@ config BK7258_PSRAM_SIZE
 	help
 		Physical PSRAM capacity required by the validated app_ab layout.
 
-config BK7258_PSRAM_TEST
-	bool "Run BK7258 PSRAM boundary test at boot"
-	default n
-	depends on BK7258_PSRAM
-	help
-		Run a non-destructive save, pattern, read-back and restore test on
-		the AP-owned PSRAM regions. The CP-owned 128 KiB heap is skipped.
-
 endif
