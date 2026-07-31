@@ -5,6 +5,7 @@
 #include <nuttx/config.h>
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 #include <nuttx/irq.h>
 #include <nuttx/kthread.h>
 #include <nuttx/semaphore.h>
+#include <nuttx/signal.h>
 
 #include "hardware/bk7258_mbox.h"
 
@@ -61,6 +63,11 @@ struct mailbox_stats
   uint32_t fifo_full;
   uint32_t ack_timeout;
   uint32_t bad_envelope;
+  uint32_t unsupported_channel;
+  uint32_t last_bad_address;
+  uint32_t last_bad_length;
+  uint32_t last_bad_source;
+  uint32_t last_bad_channel;
   uint32_t bad_ack;
   uint32_t reset_count;
   uint32_t uart_drop;
@@ -402,10 +409,10 @@ static void mailbox_rx(const bk7258_mbox_message_t *wire)
 
   if (!valid_cp_message(wire, &address))
     {
-      static const uint8_t diag_bad_envelope[] = "mbox: bad_envelope\r\n";
       g_stats.bad_envelope++;
-      (void)bk7258_mbox_uart_write(diag_bad_envelope,
-                                    sizeof(diag_bad_envelope) - 1);
+      g_stats.last_bad_address = wire->data[0];
+      g_stats.last_bad_length = wire->data[1];
+      g_stats.last_bad_source = wire->src_cpu;
       return;
     }
 
@@ -422,41 +429,32 @@ static void mailbox_rx(const bk7258_mbox_message_t *wire)
       return;
     }
 
-  if (logical_channel != MB_CHNL_PWC_RX &&
-      logical_channel != MB_CHNL_UART0_RX)
+  if ((logical_channel & 0xf0u) != 0x40u)
     {
-      static const uint8_t diag_unknown_chnl[] = "mbox: unknown_chnl\r\n";
-      (void)bk7258_mbox_uart_write(diag_unknown_chnl,
-                                    sizeof(diag_unknown_chnl) - 1);
-      g_stats.bad_envelope++;
-      up_irq_restore(flags);
-      return;
+      g_stats.unsupported_channel++;
+      g_stats.last_bad_channel = logical_channel;
+      message.header |= (uint32_t)CHNL_STATE_COM_FAIL << 8;
+    }
+  else if (logical_channel != MB_CHNL_PWC_RX &&
+           logical_channel != MB_CHNL_UART0_RX)
+    {
+      /* Match the vendor mailbox channel layer: a valid channel without a
+       * registered receiver still gets a COM_FAIL transport ACK. Returning
+       * without the ACK leaves CP's physical channel BUSY and blocks higher
+       * priority PWC responses queued behind this message.
+       */
+
+      g_stats.unsupported_channel++;
+      g_stats.last_bad_channel = logical_channel;
+      message.header |= (uint32_t)CHNL_STATE_COM_FAIL << 8;
     }
 
   if (logical_channel == MB_CHNL_UART0_RX)
     {
-      /* CP forwards raw keypresses from the physical UART0 CLI input path
-       * (bk_avdk_smp cp/components/bk_cli/shell_task.c's
-       * ap_uart0_rx_forward()) using the same address+length envelope
-       * convention as the existing AP->CP UART0 TX direction: param1 is the
-       * address of a CP-RAM buffer holding the raw bytes, param2 is the
-       * byte count. Armino also initializes MB_UART0 by sending SEND_STATE
-       * from CP with no payload; both cases are acknowledged with RTS
-       * deasserted so the CP endpoint reaches ready. */
-      if ((message.header & 0xffu) == MB_UART_SEND_DATA &&
-          message.param1 != 0 && message.param2 != 0 &&
-          address_in_cp_ram(message.param1, message.param2) &&
-          message.param2 <= UART_XCHG_SIZE)
-        {
-          extern void bk7258_serial_rx_push(const uint8_t *data,
-                                             uint16_t length);
-          static const uint8_t diag_msg[] = "mbox: uart0_rx hit\r\n";
-          (void)bk7258_mbox_uart_write(diag_msg, sizeof(diag_msg) - 1);
-          bk7258_serial_rx_push((const uint8_t *)message.param1,
-                                 (uint16_t)message.param2);
-        }
-      else if ((message.header & 0xffu) != MB_UART_SEND_DATA &&
-               (message.header & 0xffu) != MB_UART_SEND_STATE)
+      /* This port is output-only. Acknowledge Armino's state/data commands
+       * with RTS deasserted without injecting CP CLI input into AP serial. */
+      if ((message.header & 0xffu) != MB_UART_SEND_DATA &&
+          (message.header & 0xffu) != MB_UART_SEND_STATE)
         {
           message.header |= (uint32_t)CHNL_STATE_COM_FAIL << 8;
         }
@@ -543,9 +541,102 @@ int bk7258_mbox_send_message(uint8_t command, uint8_t logical_channel,
 }
 
 int bk7258_mailbox_send_pwc(uint8_t command, uint32_t p1, uint32_t p2,
-                            uint32_t p3)
+                             uint32_t p3)
 {
   return queue_message(MB_CHNL_PWC_TX, command, p1, p2, p3);
+}
+
+int bk7258_mailbox_wait_hw_control(unsigned int timeout_ms)
+{
+  clock_t deadline = clock_systime_ticks() + MSEC2TICK(timeout_ms);
+
+  for (;;)
+    {
+      irqstate_t flags;
+      bool idle;
+
+      flags = up_irq_save();
+      idle = !g_channels[1].pending;
+      up_irq_restore(flags);
+      if (idle)
+        {
+          return OK;
+        }
+
+      if ((int32_t)(clock_systime_ticks() - deadline) >= 0)
+        {
+          return -ETIMEDOUT;
+        }
+
+      nxsig_usleep(1000);
+    }
+}
+
+int bk7258_mailbox_wait_pwc(unsigned int timeout_ms)
+{
+  clock_t deadline = clock_systime_ticks() + MSEC2TICK(timeout_ms);
+
+  for (;;)
+    {
+      irqstate_t flags;
+      bool pending;
+
+      flags = up_irq_save();
+      pending = g_channels[0].pending;
+      up_irq_restore(flags);
+      if (!pending)
+        {
+          return OK;
+        }
+
+      if ((int32_t)(clock_systime_ticks() - deadline) >= 0)
+        {
+          return -ETIMEDOUT;
+        }
+
+      nxsig_usleep(1000);
+    }
+}
+
+void bk7258_mailbox_dump_stats(void)
+{
+  irqstate_t flags;
+  struct mailbox_stats stats;
+  uint8_t active;
+  bool busy;
+  bool pwc_pending;
+  bool hw_pending;
+
+  flags = up_irq_save();
+  stats = g_stats;
+  active = g_active_channel;
+  busy = g_phy_busy;
+  pwc_pending = g_channels[0].pending;
+  hw_pending = g_channels[1].pending;
+  up_irq_restore(flags);
+
+  printf("mailbox: busy=%u active=0x%02x pwc_pending=%u hw_pending=%u "
+         "tx=%lu rx=%lu ack_timeout=%lu bad_ack=%lu bad_envelope=%lu "
+         "unsupported=%lu fifo_full=%lu\n",
+         busy, active, pwc_pending, hw_pending,
+         (unsigned long)stats.tx_count, (unsigned long)stats.rx_count,
+         (unsigned long)stats.ack_timeout, (unsigned long)stats.bad_ack,
+         (unsigned long)stats.bad_envelope,
+         (unsigned long)stats.unsupported_channel,
+         (unsigned long)stats.fifo_full);
+  if (stats.bad_envelope != 0)
+    {
+      printf("mailbox: last bad wire src=%lu address=0x%08lx length=%lu\n",
+             (unsigned long)stats.last_bad_source,
+             (unsigned long)stats.last_bad_address,
+             (unsigned long)stats.last_bad_length);
+    }
+
+  if (stats.unsupported_channel != 0)
+    {
+      printf("mailbox: last unsupported logical channel=0x%02lx\n",
+             (unsigned long)stats.last_bad_channel);
+    }
 }
 
 int bk7258_mbox_uart_write(const uint8_t *data, uint16_t length)

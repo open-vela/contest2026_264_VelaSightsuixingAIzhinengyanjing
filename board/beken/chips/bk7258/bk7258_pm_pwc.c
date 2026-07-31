@@ -5,6 +5,7 @@
 #include <nuttx/config.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 #include <nuttx/semaphore.h>
 #include <nuttx/sched.h>
@@ -12,14 +13,22 @@
 #include <nuttx/kthread.h>
 #include <nuttx/clock.h>
 
-int bk7258_mailbox_init(void);
-int bk7258_mailbox_send_pwc(uint8_t command, uint32_t p1, uint32_t p2,
-                            uint32_t p3);
-void bk7258_mailbox_set_pwc_rx(void (*callback)(const void *message));
+#include "bk7258_psram.h"
 #include "hardware/bk7258_mbox.h"
 
 #define PM_CPU1_BOOT_READY_CMD 0x5u
+#define PM_CTRL_PSRAM_POWER_CMD 0x7u
+#define PM_CP1_PSRAM_MALLOC_STATE_CMD 0x8u
+#define PM_CP1_DUMP_PSRAM_MALLOC_INFO_CMD 0x9u
+#define PM_CP1_RECOVERY_CMD 0xau
+#define PM_POWER_PSRAM_MODULE_CPU1 11u
+#define PM_POWER_MODULE_STATE_ON 0u
+#define PM_POWER_MODULE_STATE_OFF 1u
+#define PM_RECOVERY_STATE_INIT 0u
+#define PM_RECOVERY_STATE_FINISH 1u
 #define PM_QUEUE_DEPTH 8u
+#define PM_TRANSPORT_TIMEOUT_MS 500u
+#define PM_RESPONSE_TIMEOUT_MS 1000u
 
 struct pwc_message
 {
@@ -34,8 +43,11 @@ static volatile unsigned int g_head;
 static volatile unsigned int g_tail;
 static sem_t g_pwc_sem;
 static sem_t g_worker_sem;
+static sem_t g_psram_power_sem;
 static volatile bool g_worker_ready;
 static volatile bool g_ready_sent;
+static volatile bool g_psram_power_waiting;
+static volatile uint32_t g_psram_power_state;
 
 static int ipc_heartbeat_worker(int argc, char **argv)
 {
@@ -86,11 +98,52 @@ static int pwc_worker(int argc, char **argv)
       /* Hardware power/clock actions stay in this thread, never in IRQ. */
       switch (message.header & 0xffu)
         {
-          case 0x7u: /* PSRAM power request: CP owns the PHY transition. */
-          case 0xau: /* AP recovery request. */
-          case 0x8u: /* allocator state query. */
-          case 0x9u: /* allocator diagnostics query. */
+          case PM_CTRL_PSRAM_POWER_CMD:
+            /* Current AVDK SMP responds with the requested ON/OFF state in
+             * param1. It does not return the PSRAM driver error code.
+             */
+
+            g_psram_power_state = message.param1;
+            if (g_psram_power_waiting)
+              {
+                g_psram_power_waiting = false;
+                nxsem_post(&g_psram_power_sem);
+              }
             break;
+
+#ifdef CONFIG_BK7258_PSRAM
+          case PM_CP1_PSRAM_MALLOC_STATE_CMD:
+            if (message.param1 == 0u)
+              {
+                (void)bk7258_mailbox_send_pwc(
+                  PM_CP1_PSRAM_MALLOC_STATE_CMD,
+                  PM_CP1_PSRAM_MALLOC_STATE_CMD,
+                  bk7258_psram_heap_used(), 0);
+              }
+            else if (message.param1 == PM_POWER_MODULE_STATE_OFF)
+              {
+                /* This CP notification is sent after physical power-down. */
+
+                bk7258_psram_power_lost();
+              }
+            break;
+
+          case PM_CP1_DUMP_PSRAM_MALLOC_INFO_CMD:
+            bk7258_psram_dump();
+            break;
+
+          case PM_CP1_RECOVERY_CMD:
+            {
+              int ret = bk7258_psram_shutdown();
+
+              (void)bk7258_mailbox_send_pwc(
+                PM_CP1_RECOVERY_CMD, PM_POWER_PSRAM_MODULE_CPU1,
+                ret == 0 ? PM_RECOVERY_STATE_FINISH :
+                           PM_RECOVERY_STATE_INIT, 0);
+            }
+            break;
+#endif
+
           default:
             break;
         }
@@ -101,12 +154,17 @@ static int pwc_worker(int argc, char **argv)
 int bk7258_pwc_start(void)
 {
   int pid;
+  int ret;
+
   nxsem_init(&g_pwc_sem, 0, 0);
   nxsem_init(&g_worker_sem, 0, 0);
+  nxsem_init(&g_psram_power_sem, 0, 0);
   g_head = 0;
   g_tail = 0;
   g_worker_ready = false;
   g_ready_sent = false;
+  g_psram_power_waiting = false;
+  g_psram_power_state = PM_POWER_MODULE_STATE_OFF;
   pid = bk7258_mailbox_init();
   if (pid < 0)
     {
@@ -119,6 +177,16 @@ int bk7258_pwc_start(void)
     {
       return -1;
     }
+
+  ret = bk7258_mailbox_wait_hw_control(PM_TRANSPORT_TIMEOUT_MS);
+  if (ret < 0)
+    {
+      printf("PWC: IPC power-up transport timeout, error=%d\n", ret);
+      bk7258_mailbox_dump_stats();
+      return ret;
+    }
+  printf("PWC: IPC power-up transport complete\n");
+
   if (kthread_create("ipc-heartbeat", 100, 1536, ipc_heartbeat_worker,
                      NULL) < 0)
     {
@@ -132,12 +200,76 @@ int bk7258_pwc_start(void)
   if (nxsem_tickwait_uninterruptible(&g_worker_sem, MSEC2TICK(200)) < 0 ||
       !g_worker_ready)
     {
+      printf("PWC: worker start timeout\n");
+      bk7258_mailbox_dump_stats();
       return -ETIMEDOUT;
     }
+  printf("PWC: worker ready\n");
+
+  /* CP boots CPU1 from its low-power worker and waits there for this ready
+   * command. Send it before requesting PSRAM, whose vote is handled by that
+   * same worker, otherwise the two cores deadlock waiting for each other.
+   */
+
+  g_ready_sent = bk7258_mailbox_send_pwc(PM_CPU1_BOOT_READY_CMD,
+                                         1, 0, 0) == 0;
   if (!g_ready_sent)
     {
-      g_ready_sent = bk7258_mailbox_send_pwc(PM_CPU1_BOOT_READY_CMD, 1, 0, 0) == 0;
+      printf("PWC: CPU1 boot-ready queue failed\n");
+      bk7258_mailbox_dump_stats();
+      return -EIO;
     }
+
+  ret = bk7258_mailbox_wait_pwc(PM_TRANSPORT_TIMEOUT_MS);
+  if (ret < 0)
+    {
+      printf("PWC: CPU1 boot-ready transport timeout, error=%d\n", ret);
+      bk7258_mailbox_dump_stats();
+      return ret;
+    }
+
+  printf("PWC: CPU1 boot-ready acknowledged by CP transport\n");
+
+#ifdef CONFIG_BK7258_PSRAM
+  g_psram_power_waiting = true;
+  ret = bk7258_mailbox_send_pwc(PM_CTRL_PSRAM_POWER_CMD,
+                                PM_POWER_PSRAM_MODULE_CPU1,
+                                PM_POWER_MODULE_STATE_ON, 0);
+  if (ret >= 0)
+    {
+      ret = nxsem_tickwait_uninterruptible(&g_psram_power_sem,
+                         MSEC2TICK(PM_RESPONSE_TIMEOUT_MS));
+    }
+
+  g_psram_power_waiting = false;
+  if (ret < 0 || g_psram_power_state != PM_POWER_MODULE_STATE_ON)
+    {
+      printf("PWC: PSRAM power response failed, error=%d state=%lu\n",
+             ret, (unsigned long)g_psram_power_state);
+      bk7258_mailbox_dump_stats();
+#ifdef CONFIG_BK7258_PSRAM_REQUIRED
+      return ret < 0 ? ret : -EIO;
+#endif
+    }
+  else
+    {
+      printf("PWC: PSRAM power vote ON acknowledged\n");
+      ret = bk7258_psram_initialize();
+      if (ret < 0)
+        {
+          printf("PWC: PSRAM allocator initialization failed, error=%d\n",
+                 ret);
+#ifdef CONFIG_BK7258_PSRAM_REQUIRED
+          return ret;
+#endif
+        }
+      else
+        {
+          printf("PWC: PSRAM allocators ONLINE\n");
+        }
+    }
+#endif
+
   if (g_ready_sent)
     {
       return 0;

@@ -22,6 +22,7 @@ MEMORY
 {
   FLASH (rx)  : ORIGIN = 0x02150000, LENGTH = 0x00110000
   RAM   (rwx) : ORIGIN = 0x28010000, LENGTH = 0x00054000
+  PSRAM_SECTION (rw) : ORIGIN = 0x60a00000, LENGTH = 0x00600000
 }
 
 __ap_ram_start = ORIGIN(RAM);
@@ -106,7 +107,31 @@ SECTIONS
     __idle_stack_top = .;
   } > RAM
 
-  __heap_start = ALIGN(., 8);
+  .psram.data : ALIGN(8)
+  {
+    __ap_psram_data_start = .;
+    *(.psram.data .psram.data.*)
+    __ap_psram_data_end = .;
+  } > PSRAM_SECTION AT > FLASH
+
+  .psram.bss (NOLOAD) : ALIGN(8)
+  {
+    __ap_psram_bss_start = .;
+    *(.psram.bss .psram.bss.*)
+    __ap_psram_bss_end = .;
+  } > PSRAM_SECTION
+
+  .psram.noinit (NOLOAD) : ALIGN(8)
+  {
+    __ap_psram_noinit_start = .;
+    *(.psram.noinit .psram.noinit.*)
+    __ap_psram_noinit_end = .;
+  } > PSRAM_SECTION
+
+  __ap_psram_section_start = ORIGIN(PSRAM_SECTION);
+  __ap_psram_section_end = ORIGIN(PSRAM_SECTION) + LENGTH(PSRAM_SECTION);
+
+  __heap_start = ALIGN(ADDR(.idle_stack) + SIZEOF(.idle_stack), 8);
   __heap_end = __ap_ram_end;
   _eram = __ap_ram_end;
 
@@ -127,4 +152,16 @@ SECTIONS
   ASSERT(_ebss <= __ap_ram_end, "AP bss overlaps CP RAM")
   ASSERT(__heap_start < __heap_end, "AP heap is empty")
   ASSERT(__heap_end <= __ap_ram_end, "AP heap overlaps CP RAM")
+  ASSERT(ORIGIN(PSRAM_SECTION) == 0x60a00000,
+         "AP PSRAM section base mismatch")
+  ASSERT(LENGTH(PSRAM_SECTION) == 0x00600000,
+         "AP PSRAM section size mismatch")
+  ASSERT(__ap_psram_section_end == 0x61000000,
+         "16 MB PSRAM layout end mismatch")
+  ASSERT(SIZEOF(.psram.data) == 0,
+         ".psram.data requires reset-stage copy support")
+  ASSERT(SIZEOF(.psram.bss) == 0,
+         ".psram.bss requires reset-stage clear support")
+  ASSERT(SIZEOF(.psram.noinit) == 0,
+         ".psram.noinit is not enabled for the initial PSRAM port")
 }

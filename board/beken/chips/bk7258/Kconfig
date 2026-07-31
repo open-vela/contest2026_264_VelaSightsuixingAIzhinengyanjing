@@ -43,4 +43,20 @@ config BK7258_PSRAM_SIZE
 	help
 		Physical PSRAM capacity required by the validated app_ab layout.
 
+config BK7258_PSRAM_REQUIRED
+	bool "Require PSRAM before reporting AP ready"
+	default n
+	depends on BK7258_PSRAM
+	help
+		Fail board bring-up and suppress the AP ready notification when the
+		CP power vote, AP-owned memory probe, or allocators cannot be set up.
+
+config BK7258_PSRAM_KEEP_POWERED
+	bool "Keep PSRAM powered while AP runs"
+	default y
+	depends on BK7258_PSRAM
+	help
+		Retain the CPU1 PSRAM power vote for the AP lifetime. Dynamic PSRAM
+		power-down is not safe until all media and DMA leases are integrated.
+
 endif

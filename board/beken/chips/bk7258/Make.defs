@@ -16,6 +16,7 @@ CHIP_CSRCS += bk7258_serial.c
 CHIP_CSRCS += bk7258_mbox0.c
 CHIP_CSRCS += bk7258_mailbox_channel.c
 CHIP_CSRCS += bk7258_pm_pwc.c
+CHIP_CSRCS += bk7258_psram.c
 CHIP_CSRCS += bk7258_allocateheap.c
 CHIP_CSRCS += bk7258_qspi.c
 CHIP_CSRCS += bk7258_dma.c

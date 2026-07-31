@@ -33,7 +33,10 @@ void bk7258_mbox_set_callback(bk7258_mbox_callback_t callback);
 
 int bk7258_mailbox_init(void);
 int bk7258_mailbox_send_pwc(uint8_t command, uint32_t p1, uint32_t p2,
-                            uint32_t p3);
+                             uint32_t p3);
 void bk7258_mailbox_set_pwc_rx(void (*callback)(const void *message));
+int bk7258_mailbox_wait_hw_control(unsigned int timeout_ms);
+int bk7258_mailbox_wait_pwc(unsigned int timeout_ms);
+void bk7258_mailbox_dump_stats(void);
 
 #endif

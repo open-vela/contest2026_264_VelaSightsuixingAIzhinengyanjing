@@ -10,6 +10,8 @@
 
 #include <arch/board/board.h>
 
+#include "bk7258_psram.h"
+
 int bk7258_pwc_start(void);
 int bk7258_motor_setup(void);
 int bk7258_power_key_motor_start(void);
@@ -22,6 +24,7 @@ int bk7258_bringup(void)
   int ret;
 
   button_count = board_button_initialize();
+
   ret = bk7258_motor_setup();
   if (ret < 0)
     {
@@ -37,12 +40,20 @@ int bk7258_bringup(void)
   printf("button GPIOs configured, count=%lu\n",
          (unsigned long)button_count);
   printf("PWM device registered at /dev/pwm0\n");
-  printf("mailbox transport and PWC worker ready\n");
+  printf("mailbox transport, PWC and CPU1 ready handshake complete\n");
   printf("heartbeat worker started, interval=2000 ms\n");
-  printf("CPU1 boot-ready message queued to CP\n");
 #ifdef CONFIG_BK7258_PSRAM
-  printf("PSRAM MPU window configured, base=0x60000000 "
-         "size=0x01000000 RW/XN/non-cacheable\n");
+  if (bk7258_psram_is_online())
+    {
+      printf("PSRAM online, base=0x60000000 size=0x01000000 "
+             "RW/XN/non-cacheable\n");
+      printf("PSRAM CP heap 0x60700000..0x6071ffff reserved\n");
+      bk7258_psram_dump();
+    }
+  else
+    {
+      printf("PSRAM unavailable; media services must remain disabled\n");
+    }
 #endif
 
   ret = bk7258_power_key_motor_start();
