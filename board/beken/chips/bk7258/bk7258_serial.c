@@ -5,6 +5,7 @@
 #include <nuttx/config.h>
 
 #include <errno.h>
+#include <stdio.h>
 
 #include <nuttx/irq.h>
 #include <nuttx/serial/serial.h>
@@ -137,6 +138,8 @@ void bk7258_serial_rx_push(const uint8_t *data, uint16_t length)
 {
   uint16_t i;
   sbuf_size_t next_tail;
+  uint8_t diag[32];
+  int diag_len;
 
   for (i = 0; i < length; i++)
     {
@@ -150,6 +153,14 @@ void bk7258_serial_rx_push(const uint8_t *data, uint16_t length)
 
       g_bk7258_uart1.recv.buffer[g_bk7258_uart1.recv.tail] = (char)data[i];
       g_bk7258_uart1.recv.tail = next_tail;
+    }
+
+  diag_len = snprintf((char *)diag, sizeof(diag),
+                       "mbox: rx_push %u/%u\r\n", (unsigned int)i,
+                       (unsigned int)length);
+  if (diag_len > 0)
+    {
+      (void)bk7258_mbox_uart_write(diag, (uint16_t)diag_len);
     }
 
   uart_recvchars(&g_bk7258_uart1);
