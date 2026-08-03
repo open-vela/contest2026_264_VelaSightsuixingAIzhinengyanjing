@@ -52,6 +52,8 @@ logs/                                      AI Coding日志
 - Mailbox v2基础传输、logical channel、sequence、ACK、超时和FIFO full恢复。
 - AP power-up indication、2秒heartbeat和PWC boot-ready握手。
 - AP日志通过Mailbox UART0转发到CP物理UART0。
+- GPIO40红灯和GPIO41绿灯由NuttX内核自动LED状态接口接管，用于显示
+  中断、信号、断言、Panic、空闲和启动状态。
 - AP、CP和Bootloader通过`bk_avdk_smp`标准打包流程生成`all-app.bin`。
 - 当前为CPU1单核bring-up，CPU2/AP SMP尚未启用。
 

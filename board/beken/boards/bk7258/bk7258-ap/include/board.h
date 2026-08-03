@@ -7,6 +7,8 @@
 
 #include <nuttx/config.h>
 
+#include <stdint.h>
+
 #define BOARD_NAME "bk7258-ap"
 #define BOARD_AP_RAM_START 0x28010000u
 #define BOARD_AP_RAM_END   0x28064000u
@@ -26,7 +28,22 @@
 #define BUTTON_POWER_BIT           (1u << BUTTON_POWER)
 #define BUTTON_VOLUME_DOWN_BIT     (1u << BUTTON_VOLUME_DOWN)
 
+#define BOARD_LED_RED_GPIO         40
+#define BOARD_LED_GREEN_GPIO       41
+
+#define LED_INIRQ                  0
+#define LED_SIGNAL                 1
+#define LED_ASSERTION              2
+#define LED_PANIC                  3
+#define LED_IDLE                   4
+#define LED_HEAPALLOCATE           5
+#define LED_IRQSENABLED            6
+#define LED_STACKCREATED           7
+
 int bk7258_bringup(void);
 uint32_t board_button_initialize(void);
+void board_autoled_on(int led);
+void board_autoled_off(int led);
+void bk7258_led_initialize(void);
 
 #endif

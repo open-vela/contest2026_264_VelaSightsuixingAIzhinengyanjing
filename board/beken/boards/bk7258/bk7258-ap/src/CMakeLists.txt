@@ -2,6 +2,7 @@ set(SRCS
     bk7258_boot.c
     bk7258_bringup.c
     bk7258_buttons.c
+    bk7258_leds.c
     bk7258_motor.c
     bk7258_appinit.c
     bk7258_gc9d01.c

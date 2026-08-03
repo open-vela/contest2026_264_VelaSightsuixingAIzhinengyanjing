@@ -149,17 +149,17 @@ int bk7258_psram_initialize(void)
     }
 
   g_state = BK7258_PSRAM_PROBING;
-  printf("psram: probing configured region boundaries\n");
+  /* printf("psram: probing configured region boundaries\n"); */
   ret = psram_probe();
   if (ret < 0)
     {
       goto fail;
     }
 
-  printf("psram: boundary probe complete\n");
+  /* printf("psram: boundary probe complete\n"); */
   for (i = 0; i < BK7258_PSRAM_POOL_COUNT; i++)
     {
-      printf("psram: initializing %s pool\n", g_pool_region[i].name);
+      /* printf("psram: initializing %s pool\n", g_pool_region[i].name); */
       g_pool_heap[i] = mm_initialize(g_pool_region[i].name,
                                      (void *)g_pool_region[i].base,
                                      g_pool_region[i].size);
@@ -170,7 +170,7 @@ int bk7258_psram_initialize(void)
         }
     }
 
-  printf("psram: initializing AP heap\n");
+  /* printf("psram: initializing AP heap\n"); */
   g_psram_heap = mm_initialize("bk7258-ap-psram",
                                (void *)BK7258_AP_PSRAM_HEAP_BASE,
                                BK7258_AP_PSRAM_HEAP_SIZE);

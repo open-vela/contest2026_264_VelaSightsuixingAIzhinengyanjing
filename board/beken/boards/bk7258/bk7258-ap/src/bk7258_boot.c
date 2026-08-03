@@ -9,6 +9,7 @@
 
 void board_early_initialize(void)
 {
+  bk7258_led_initialize();
 }
 
 int board_app_initialize(uintptr_t arg)

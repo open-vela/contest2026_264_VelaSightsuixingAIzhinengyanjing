@@ -274,7 +274,7 @@ int bk7258_pwc_start(void)
     }
   else
     {
-      printf("PWC: PSRAM power vote ON acknowledged\n");
+      /* printf("PWC: PSRAM power vote ON acknowledged\n"); */
       ret = bk7258_psram_initialize();
       if (ret < 0)
         {
@@ -287,7 +287,7 @@ int bk7258_pwc_start(void)
         }
       else
         {
-          printf("PWC: PSRAM allocators ONLINE\n");
+          /* printf("PWC: PSRAM allocators ONLINE\n"); */
         }
     }
 #endif

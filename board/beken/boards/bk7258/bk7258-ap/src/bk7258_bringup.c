@@ -47,8 +47,8 @@ int bk7258_bringup(void)
     {
       printf("PSRAM online, base=0x60000000 size=0x01000000 "
              "RW/XN/non-cacheable\n");
-      printf("PSRAM CP heap 0x60700000..0x6071ffff reserved\n");
-      bk7258_psram_dump();
+      /* printf("PSRAM CP heap 0x60700000..0x6071ffff reserved\n"); */
+      /* bk7258_psram_dump(); */
     }
   else
     {
@@ -84,7 +84,9 @@ void board_late_initialize(void)
    * the unconditionally-called CONFIG_BOARD_LATE_INITIALIZE hook.  See
    * docs/superpowers/plans/2026-07-29-gc9d01-lcd-bringup.md Task 3 Step 3.
    */
-  (void)bk7258_gc9d01_test(0, NULL);
+  /* Disabled while isolating the QSPI command-completion wait from the
+   * power-key motor polling worker. */
+  /* (void)bk7258_gc9d01_test(0, NULL); */
 
   /* GC2145 camera: registered as a standard V4L2 /dev/video0 node here
    * (imgdata+imgsensor framework, see bk7258_camera_bringup.c), superseding

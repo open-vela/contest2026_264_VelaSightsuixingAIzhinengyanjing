@@ -4,6 +4,7 @@ config ARCH_BOARD_BK7258_AP
 	bool "BK7258 AP board"
 	default y
 	select ARCH_HAVE_BUTTONS
+	select ARCH_HAVE_LEDS
 
 config BK7258_AP_UART1
 	bool "Use UART1 for the AP console"
