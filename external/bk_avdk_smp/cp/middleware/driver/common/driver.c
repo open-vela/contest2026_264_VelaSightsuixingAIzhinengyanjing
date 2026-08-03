@@ -42,45 +42,12 @@
 #if CONFIG_MAILBOX
 #include <driver/mb_uart_driver.h>
 #include <driver/mb_chnl_buff.h>
-#include <driver/mailbox_channel.h>
 #include <components/shell_task.h>
 
 #define AP_UART0_LOG_LINE_SIZE 256
 #define AP_UART0_LOG_RETRY_MAX 3
 #define AP_UART0_LOG_RETRY_MS  10
 #define AP_UART0_LOG_FLUSH_MS  50
-
-/* AP<-CP keypress forwarding: mirrors the AP->CP UART0 TX direction's
- * address+length envelope convention (see AP-side bk7258_mailbox_channel.c
- * uart_prepare()/MB_CHNL_UART0_TX). The physical UART0 CLI input path
- * (cp/components/bk_cli/shell_task.c) calls ap_uart0_rx_forward() with each
- * complete input line just before handling it locally, so the same
- * keypresses also reach the AP core's NuttX console -- see
- * docs/superpowers/specs/2026-07-31-mailbox-uart0-rx-design.md. */
-#define AP_UART0_RX_BUF_SIZE 256u
-#define MB_CHNL_UART0_RX     0x49u
-#define MB_UART_SEND_DATA    0u
-
-static uint8_t s_ap_uart0_rx_buff[AP_UART0_RX_BUF_SIZE];
-
-void ap_uart0_rx_forward(const uint8_t *data, uint16_t length)
-{
-	mailbox_data_t message;
-
-	if (data == NULL || length == 0 || length > AP_UART0_RX_BUF_SIZE)
-	{
-		return;
-	}
-
-	memcpy(s_ap_uart0_rx_buff, data, length);
-
-	message.param0 = ((uint32_t)MB_CHNL_UART0_RX << 24) | MB_UART_SEND_DATA;
-	message.param1 = (uint32_t)(uintptr_t)s_ap_uart0_rx_buff;
-	message.param2 = length;
-	message.param3 = 0;
-
-	(void)bk_mailbox_send(&message, MAILBOX_CPU1, MAILBOX_CPU0, NULL);
-}
 
 static beken_semaphore_t s_ap_uart0_log_sem;
 static beken_thread_t s_ap_uart0_log_thread;
