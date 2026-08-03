@@ -320,13 +320,6 @@ static int queue_message(uint8_t logical_channel, uint8_t command,
   return ret == -EAGAIN ? OK : ret;
 }
 
-static bool address_in_cp_ram(uintptr_t address, uint32_t length)
-{
-  return (address & 3u) == 0 && address >= CP_RAM_START &&
-         length > 0 && length <= CP_RAM_END - CP_RAM_START &&
-         address <= CP_RAM_END - length;
-}
-
 static bool valid_cp_message(const bk7258_mbox_message_t *wire,
                              uintptr_t *address)
 {
@@ -335,7 +328,8 @@ static bool valid_cp_message(const bk7258_mbox_message_t *wire,
    * CP .bss and is only word-aligned; 32-byte alignment is reserved for the
    * separate exchange payload buffers. */
   return wire->src_cpu == 0 && wire->data[1] == sizeof(struct mb_message) &&
-         address_in_cp_ram(*address, sizeof(struct mb_message));
+         (*address & 3u) == 0 && *address >= CP_RAM_START &&
+         *address <= CP_RAM_END - sizeof(struct mb_message);
 }
 
 static void handle_ack(struct mb_message *message)

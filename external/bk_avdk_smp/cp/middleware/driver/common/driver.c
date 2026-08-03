@@ -43,7 +43,6 @@
 #include <driver/mb_uart_driver.h>
 #include <driver/mb_chnl_buff.h>
 #include <driver/mailbox_channel.h>
-#include "mailbox_driver_base.h"
 #include <components/shell_task.h>
 
 #define AP_UART0_LOG_LINE_SIZE 256
@@ -67,11 +66,9 @@ static uint8_t s_ap_uart0_rx_buff[AP_UART0_RX_BUF_SIZE];
 void ap_uart0_rx_forward(const uint8_t *data, uint16_t length)
 {
 	mailbox_data_t message;
-	bk_err_t send_ret;
 
 	if (data == NULL || length == 0 || length > AP_UART0_RX_BUF_SIZE)
 	{
-		BK_LOGI(NULL, "ap_uart0_rx_forward: reject len=%u\r\n", (unsigned int)length);
 		return;
 	}
 
@@ -82,9 +79,7 @@ void ap_uart0_rx_forward(const uint8_t *data, uint16_t length)
 	message.param2 = length;
 	message.param3 = 0;
 
-	send_ret = bk_mailbox_send(&message, MAILBOX_CPU0, MAILBOX_CPU1, NULL);
-	BK_LOGI(NULL, "ap_uart0_rx_forward: len=%u ret=%d\r\n", (unsigned int)length,
-		(int)send_ret);
+	(void)bk_mailbox_send(&message, MAILBOX_CPU1, MAILBOX_CPU0, NULL);
 }
 
 static beken_semaphore_t s_ap_uart0_log_sem;
