@@ -25,20 +25,5 @@ notes/
 music.mp3
 music.flac
 
-# Desktop simulation test binaries for the BK7258 camera driver stack
-# (board/beken/chips/bk7258/sim_tests/ and
-# board/beken/boards/bk7258/bk7258-ap/src/sim_tests_gc2145/): both test
-# suites' Makefiles emit their compiled test binaries and object files
-# under a build/ subdirectory, already covered by the "build/" rule
-# above -- this comment exists only to make that coverage explicit for
-# future maintainers, since these are native x86 test binaries (not
-# ARM/NuttX build artifacts) and it is not obvious from the "build/"
-# rule alone that they are intentionally covered rather than
-# accidentally matched.
-
 # Vendor confidential documents (not for open-source distribution)
 *Datasheet*.pdf
-
-docs/superpowers/
-docs/README
-board/beken/chips/bk7258/sim_tests
