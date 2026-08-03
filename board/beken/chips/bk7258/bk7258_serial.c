@@ -5,7 +5,6 @@
 #include <nuttx/config.h>
 
 #include <errno.h>
-#include <stdio.h>
 
 #include <nuttx/irq.h>
 #include <nuttx/serial/serial.h>
@@ -20,27 +19,6 @@
 #ifndef CONFIG_UART1_TXBUFSIZE
 #  define CONFIG_UART1_TXBUFSIZE 256
 #endif
-
-/* dev->recv is NuttX's serial framework's own ring buffer, populated by
- * uart_recvchars() itself by repeatedly calling this driver's receive()
- * (once per byte, "give me the next hardware byte") and rxavailable()
- * ("is there another hardware byte ready?") -- see uart_16550.c's
- * u16550_receive() for the reference pattern: it reads directly from a
- * hardware register, it never touches dev->recv.
- *
- * This driver's "hardware" is the mailbox UART0 RX channel
- * (bk7258_mailbox_channel.c's mailbox_rx() -> bk7258_serial_rx_push()),
- * which delivers a whole line at once from an IRQ callback rather than one
- * byte at a time from a real UART RX FIFO register. So this driver needs
- * its own small private FIFO to bridge "IRQ hands us N bytes at once" to
- * "framework asks for bytes one at a time via receive()/rxavailable()" --
- * it must NOT reuse dev->recv for this, since uart_recvchars() owns that
- * buffer's head/tail and writes to it itself. */
-#define BK7258_HW_RXFIFO_SIZE 256u
-
-static uint8_t g_bk7258_hw_rxfifo[BK7258_HW_RXFIFO_SIZE];
-static uint16_t g_bk7258_hw_rxfifo_head; /* next byte to pop (receive()) */
-static uint16_t g_bk7258_hw_rxfifo_tail; /* next free slot (rx_push()) */
 
 extern void bk7258_uart1_configure(void);
 
@@ -73,14 +51,13 @@ static int bk7258_receive(struct uart_dev_s *dev, unsigned int *status)
 
   *status = 0;
 
-  if (g_bk7258_hw_rxfifo_head == g_bk7258_hw_rxfifo_tail)
+  if (dev->recv.head == dev->recv.tail)
     {
       return -1;
     }
 
-  ch = (unsigned char)g_bk7258_hw_rxfifo[g_bk7258_hw_rxfifo_head];
-  g_bk7258_hw_rxfifo_head =
-      (g_bk7258_hw_rxfifo_head + 1) % BK7258_HW_RXFIFO_SIZE;
+  ch = (unsigned char)dev->recv.buffer[dev->recv.head];
+  dev->recv.head = (dev->recv.head + 1) % dev->recv.size;
   return ch;
 }
 
@@ -90,7 +67,7 @@ static void bk7258_rxint(struct uart_dev_s *dev, bool enable)
 
 static bool bk7258_rxavailable(struct uart_dev_s *dev)
 {
-  return g_bk7258_hw_rxfifo_head != g_bk7258_hw_rxfifo_tail;
+  return dev->recv.head != dev->recv.tail;
 }
 
 static void bk7258_send(struct uart_dev_s *dev, int ch)
@@ -159,33 +136,20 @@ void bk7258_serial_tx_available(void)
 void bk7258_serial_rx_push(const uint8_t *data, uint16_t length)
 {
   uint16_t i;
-  uint16_t next_tail;
-  uint8_t diag[32];
-  int diag_len;
+  sbuf_size_t next_tail;
 
   for (i = 0; i < length; i++)
     {
-      next_tail = (g_bk7258_hw_rxfifo_tail + 1) % BK7258_HW_RXFIFO_SIZE;
-      if (next_tail == g_bk7258_hw_rxfifo_head)
+      next_tail = (g_bk7258_uart1.recv.tail + 1) % g_bk7258_uart1.recv.size;
+      if (next_tail == g_bk7258_uart1.recv.head)
         {
-          /* Private hardware-level FIFO full: drop the remaining bytes
-           * rather than overwrite unread data or block the mailbox RX
-           * path. This is separate from dev->recv, which is NuttX's own
-           * ring buffer that uart_recvchars() fills by calling receive()
-           * below -- see this file's BK7258_HW_RXFIFO_SIZE comment. */
+          /* Buffer full: drop the remaining bytes rather than overwrite
+           * unread data or block the mailbox RX path. */
           break;
         }
 
-      g_bk7258_hw_rxfifo[g_bk7258_hw_rxfifo_tail] = data[i];
-      g_bk7258_hw_rxfifo_tail = next_tail;
-    }
-
-  diag_len = snprintf((char *)diag, sizeof(diag),
-                       "mbox: rx_push %u/%u\r\n", (unsigned int)i,
-                       (unsigned int)length);
-  if (diag_len > 0)
-    {
-      (void)bk7258_mbox_uart_write(diag, (uint16_t)diag_len);
+      g_bk7258_uart1.recv.buffer[g_bk7258_uart1.recv.tail] = (char)data[i];
+      g_bk7258_uart1.recv.tail = next_tail;
     }
 
   uart_recvchars(&g_bk7258_uart1);

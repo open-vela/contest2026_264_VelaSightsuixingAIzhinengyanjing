@@ -138,26 +138,7 @@ int bk7258_motor_setup(void)
 int bk7258_power_key_motor_start(void)
 {
 #ifdef CONFIG_BK7258_POWER_KEY_MOTOR
-  /* Priority must be strictly higher than CONFIG_BOARD_INITTHREAD_PRIORITY
-   * (100, see boards/bk7258/bk7258-ap/configs/nsh/defconfig), which is what
-   * board_late_initialize() runs on. That thread calls
-   * bk7258_gc9d01_test() (bk7258_bringup.c), whose QSPI command wait loop
-   * (bk7258_qspi.c's bk7258_qspi0_wait_done()) uses up_udelay() -- a
-   * non-yielding busy-spin (see arm_udelay.c's "NOT multi-tasking
-   * friendly" comment) that runs up to 10000 iterations per command with
-   * no hardware panel attached (every one of GC9D01's 29 init commands
-   * times out), for a worst case of roughly 290ms of unbroken CPU
-   * ownership. At equal priority (both defaulted to 100), NuttX's
-   * round-robin scheduler (CONFIG_RR_INTERVAL=200 -> 200ms slices) would
-   * not switch this thread in until the init thread's slice expires,
-   * amplifying the button's ~30ms nominal debounce latency
-   * (BK7258_KEY_POLL_US * BK7258_KEY_DEBOUNCE_COUNT) into the
-   * multi-hundred-millisecond-to-multi-second delays observed on hardware.
-   * Raising this thread's priority above 100 lets the tick-interrupt-driven
-   * preemption check reschedule it promptly instead of waiting out a full
-   * RR slice, without touching the QSPI busy-wait itself (a separate,
-   * pre-existing LCD bring-up issue tracked elsewhere). */
-  int pid = kthread_create("power-key-motor", 110, 1536,
+  int pid = kthread_create("power-key-motor", 100, 1536,
                            bk7258_motor_button_worker, NULL);
 
   return pid < 0 ? pid : OK;

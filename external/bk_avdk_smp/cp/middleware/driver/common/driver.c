@@ -68,33 +68,22 @@ void ap_uart0_rx_forward(const uint8_t *data, uint16_t length)
 {
 	mailbox_data_t message;
 	bk_err_t send_ret;
-	uint16_t total_length;
 
-	if (data == NULL || length == 0 || length + 1 > AP_UART0_RX_BUF_SIZE)
+	if (data == NULL || length == 0 || length > AP_UART0_RX_BUF_SIZE)
 	{
 		BK_LOGI(NULL, "ap_uart0_rx_forward: reject len=%u\r\n", (unsigned int)length);
 		return;
 	}
 
-	/* shell_task.c's rx_ind_process() strips the terminating '\r'/'\n' from
-	 * cmd_line_buf.cmd_buff before calling us (it writes a '\0' there
-	 * instead, see that function's CMD_TYPE_TEXT '\n'/'\r' branch) -- so
-	 * the line we are handed never contains the newline that AP-side
-	 * NuttX's nsh needs to see before it will actually execute a buffered
-	 * line, as opposed to merely echoing the characters back. Re-append a
-	 * single '\n' here so the forwarded line has the same effect as a
-	 * real Enter keypress on the AP-side console. */
 	memcpy(s_ap_uart0_rx_buff, data, length);
-	s_ap_uart0_rx_buff[length] = '\n';
-	total_length = length + 1;
 
 	message.param0 = ((uint32_t)MB_CHNL_UART0_RX << 24) | MB_UART_SEND_DATA;
 	message.param1 = (uint32_t)(uintptr_t)s_ap_uart0_rx_buff;
-	message.param2 = total_length;
+	message.param2 = length;
 	message.param3 = 0;
 
 	send_ret = bk_mailbox_send(&message, MAILBOX_CPU0, MAILBOX_CPU1, NULL);
-	BK_LOGI(NULL, "ap_uart0_rx_forward: len=%u ret=%d\r\n", (unsigned int)total_length,
+	BK_LOGI(NULL, "ap_uart0_rx_forward: len=%u ret=%d\r\n", (unsigned int)length,
 		(int)send_ret);
 }
 
