@@ -402,7 +402,10 @@ static void mailbox_rx(const bk7258_mbox_message_t *wire)
 
   if (!valid_cp_message(wire, &address))
     {
+      static const uint8_t diag_bad_envelope[] = "mbox: bad_envelope\r\n";
       g_stats.bad_envelope++;
+      (void)bk7258_mbox_uart_write(diag_bad_envelope,
+                                    sizeof(diag_bad_envelope) - 1);
       return;
     }
 
@@ -422,6 +425,9 @@ static void mailbox_rx(const bk7258_mbox_message_t *wire)
   if (logical_channel != MB_CHNL_PWC_RX &&
       logical_channel != MB_CHNL_UART0_RX)
     {
+      static const uint8_t diag_unknown_chnl[] = "mbox: unknown_chnl\r\n";
+      (void)bk7258_mbox_uart_write(diag_unknown_chnl,
+                                    sizeof(diag_unknown_chnl) - 1);
       g_stats.bad_envelope++;
       up_irq_restore(flags);
       return;
@@ -444,6 +450,8 @@ static void mailbox_rx(const bk7258_mbox_message_t *wire)
         {
           extern void bk7258_serial_rx_push(const uint8_t *data,
                                              uint16_t length);
+          static const uint8_t diag_msg[] = "mbox: uart0_rx hit\r\n";
+          (void)bk7258_mbox_uart_write(diag_msg, sizeof(diag_msg) - 1);
           bk7258_serial_rx_push((const uint8_t *)message.param1,
                                  (uint16_t)message.param2);
         }
