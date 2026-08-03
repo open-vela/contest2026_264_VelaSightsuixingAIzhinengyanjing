@@ -10,7 +10,7 @@
 #include <nuttx/board.h>
 #include <nuttx/ioexpander/gpio.h>
 
-#include "board.h"
+#include <arch/board/board.h>
 
 #ifdef CONFIG_DEV_GPIO
 struct bk7258_button_gpio_s

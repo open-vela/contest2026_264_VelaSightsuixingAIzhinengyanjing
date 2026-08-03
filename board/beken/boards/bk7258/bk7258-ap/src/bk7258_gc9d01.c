@@ -33,18 +33,48 @@
  * commands, since bk7258_qspi0_send_cmd() has no equivalent marker
  * convention.
  *
+ * Bus/reset-pin correction (2026-07-31): the very first init command
+ * (0xFE) was timing out on real hardware.  Root cause was two wrong
+ * hardware assumptions, both corrected together (diagnosed via the board
+ * schematic, AIDK_AI玩具开发板_原理图.pdf):
+ *   1. bk7258_qspi.c was driving QSPI0 (GPIO22-25), but this board's
+ *      LCD is wired to QSPI1 (GPIO2-5) -- see that file's header comment
+ *      for the full pin-by-pin schematic evidence.
+ *   2. GC9D01_RESET_PIN below was GPIO_6 (copied from a different board's
+ *      dual-screen reference config in BTdocs/DualScreenAVIPlayer.md);
+ *      the schematic shows GPIO_6 floating (unconnected) on this board,
+ *      the real LCD_RST net is GPIO45.
+ * Neither symptom was diagnosable from register-level behavior alone
+ * (cmd_start_done simply never asserts when the controller drives pins
+ * the panel isn't wired to); both required cross-checking the schematic
+ * against gpio_map.h's pinmux function tables.
+ *
  * SPDX-License-Identifier: Apache-2.0
  ****************************************************************************/
 
 #include <nuttx/config.h>
 #include <nuttx/arch.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
-#include "bk7258_gc9d01_gpio.h"
+#include "bk7258_gpio.h"
 #include "bk7258_qspi.h"
 
-#define GC9D01_RESET_PIN 6u /* GPIO_6, per BTdocs/DualScreenAVIPlayer.md lcd0 config */
+/* GC9D01 reset pin, corrected against the actual board schematic
+ * (AIDK_AI玩具开发板_原理图.pdf) after this driver's original QSPI0/GPIO6
+ * assumption (ported from BTdocs/DualScreenAVIPlayer.md's lcd0 config,
+ * a *different* board's dual-screen reference layout) caused the very
+ * first init command (0xFE) to time out -- the panel was never wired to
+ * the pins this driver was toggling.  The schematic (sheet 2/6 main chip
+ * pin table) shows GPIO_6 net-labelled nothing at all on this board
+ * (floating, no connection); the actual LCD_RST net is wired to chip pin
+ * 65 = P45 = GPIO45 (same sheet's pin table row "P45/0CSN/B5/D2/2LRCK"),
+ * confirmed again on sheet 5/6's CN5 single-screen connector pin 13
+ * (labelled LCD_RST). See bk7258_qspi.c's file header for the QSPI0->
+ * QSPI1 correction that was diagnosed alongside this one (both changes
+ * were needed to get past the same "cmd 0xFE timed out" symptom). */
+#define GC9D01_RESET_PIN 45u
 
 /* Post-Sleep-Out settle delay before Display On, per upstream
  * gc9d01_init_cmds entry {0x00, {0x78}, 0xFF} (0x78 = 120 decimal ms). */
@@ -121,12 +151,11 @@ static const struct gc9d01_init_cmd g_gc9d01_display_on = { 0x29, { 0x00 }, 0 };
 
 static void bk7258_gc9d01_hw_reset(void)
 {
-  bk7258_gpio_output_enable(GC9D01_RESET_PIN);
-  bk7258_gpio_set_high(GC9D01_RESET_PIN);
+  bk7258_gpio_output(GC9D01_RESET_PIN, true);
   up_udelay(10000);
-  bk7258_gpio_set_low(GC9D01_RESET_PIN);
+  bk7258_gpio_write(GC9D01_RESET_PIN, false);
   up_udelay(10000);
-  bk7258_gpio_set_high(GC9D01_RESET_PIN);
+  bk7258_gpio_write(GC9D01_RESET_PIN, true);
   up_udelay(120000);
 }
 
@@ -159,9 +188,15 @@ int bk7258_gc9d01_test(int argc, char **argv)
          (unsigned int)GC9D01_PRE_SLEEP_OUT_CMD_COUNT);
   for (i = 0; i < GC9D01_PRE_SLEEP_OUT_CMD_COUNT; i++)
     {
-      bk7258_qspi0_send_cmd(g_gc9d01_init_cmds_pre_sleep_out[i].cmd,
-                            g_gc9d01_init_cmds_pre_sleep_out[i].data,
-                            g_gc9d01_init_cmds_pre_sleep_out[i].data_len);
+      if (!bk7258_qspi0_send_cmd(g_gc9d01_init_cmds_pre_sleep_out[i].cmd,
+                                 g_gc9d01_init_cmds_pre_sleep_out[i].data,
+                                 g_gc9d01_init_cmds_pre_sleep_out[i].data_len))
+        {
+          printf("gc9d01: qspi0 timed out waiting for cmd 0x%02x "
+                 "(index %u) to complete, aborting init sequence\n",
+                 g_gc9d01_init_cmds_pre_sleep_out[i].cmd, (unsigned int)i);
+          return -1;
+        }
     }
 
   printf("gc9d01: sleep-out settle delay (%u ms)\n",
@@ -169,9 +204,14 @@ int bk7258_gc9d01_test(int argc, char **argv)
   up_udelay(GC9D01_SLEEP_OUT_DELAY_MS * 1000u);
 
   printf("gc9d01: display on\n");
-  bk7258_qspi0_send_cmd(g_gc9d01_display_on.cmd,
-                        g_gc9d01_display_on.data,
-                        g_gc9d01_display_on.data_len);
+  if (!bk7258_qspi0_send_cmd(g_gc9d01_display_on.cmd,
+                             g_gc9d01_display_on.data,
+                             g_gc9d01_display_on.data_len))
+    {
+      printf("gc9d01: qspi0 timed out waiting for display-on cmd to "
+             "complete\n");
+      return -1;
+    }
 
   printf("gc9d01: init sequence completed without hang\n");
   return 0;

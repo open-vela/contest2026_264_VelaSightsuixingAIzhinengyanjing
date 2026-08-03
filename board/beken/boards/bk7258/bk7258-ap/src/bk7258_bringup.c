@@ -13,6 +13,7 @@ int bk7258_pwc_start(void);
 int bk7258_motor_setup(void);
 int bk7258_power_key_motor_start(void);
 int bk7258_gc9d01_test(int argc, char **argv);
+int bk7258_camera_initialize(void);
 
 int bk7258_bringup(void)
 {
@@ -52,4 +53,16 @@ void board_late_initialize(void)
    * docs/superpowers/plans/2026-07-29-gc9d01-lcd-bringup.md Task 3 Step 3.
    */
   (void)bk7258_gc9d01_test(0, NULL);
+
+  /* GC2145 camera: registered as a standard V4L2 /dev/video0 node here
+   * (imgdata+imgsensor framework, see bk7258_camera_bringup.c), superseding
+   * the older bare board_late_initialize() smoke-test call this line used
+   * to make directly.  The old bk7258_gc2145_test() bare entry point is
+   * kept as an independent NSH command (see bk7258_appinit.c) for
+   * side-by-side diagnostic comparison, per design discussion in
+   * docs/superpowers/plans/2026-07-30-gc2145-camera-bringup.md -- it is
+   * intentionally NOT called from here anymore, so a bug in this new V4L2
+   * driver cannot be masked by (or confused with) the old direct-call
+   * path still running unconditionally at boot. */
+  (void)bk7258_camera_initialize();
 }

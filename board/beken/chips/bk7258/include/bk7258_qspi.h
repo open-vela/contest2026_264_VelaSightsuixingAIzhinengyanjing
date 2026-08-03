@@ -17,7 +17,7 @@
  */
 
 void bk7258_qspi0_init(void);
-void bk7258_qspi0_send_cmd(uint8_t cmd, const uint8_t *data, uint8_t data_len);
+bool bk7258_qspi0_send_cmd(uint8_t cmd, const uint8_t *data, uint8_t data_len);
 uint32_t bk7258_qspi0_read_id(void);
 
 #endif /* __VENDOR_BEKEN_CHIPS_BK7258_INCLUDE_BK7258_QSPI_H */

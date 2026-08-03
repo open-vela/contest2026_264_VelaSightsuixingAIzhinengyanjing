@@ -15,7 +15,11 @@ set(SRCS
     bk7258_pm_pwc.c
     bk7258_allocateheap.c
     bk7258_qspi.c
-    bk7258_gc9d01_gpio.c)
+    bk7258_dma.c
+    bk7258_i2c_sim.c
+    bk7258_i2c1.c
+    bk7258_yuv_buf.c
+    bk7258_camera_imgdata.c)
 
 add_library(bk7258_chip OBJECT ${SRCS})
 add_dependencies(bk7258_chip nuttx_context)

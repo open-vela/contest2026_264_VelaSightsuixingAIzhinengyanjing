@@ -2,7 +2,7 @@
 
 include armv8-m/Make.defs
 
-LDFLAGS += -Wl,--entry=__start -Wl,--build-id=none
+LDFLAGS += --entry=__start --build-id=none
 
 CHIP_CSRCS = bk7258_start.c
 CHIP_CSRCS += bk7258_vectors.c
@@ -18,7 +18,11 @@ CHIP_CSRCS += bk7258_mailbox_channel.c
 CHIP_CSRCS += bk7258_pm_pwc.c
 CHIP_CSRCS += bk7258_allocateheap.c
 CHIP_CSRCS += bk7258_qspi.c
-CHIP_CSRCS += bk7258_gc9d01_gpio.c
+CHIP_CSRCS += bk7258_dma.c
+CHIP_CSRCS += bk7258_i2c_sim.c
+CHIP_CSRCS += bk7258_i2c1.c
+CHIP_CSRCS += bk7258_yuv_buf.c
+CHIP_CSRCS += bk7258_camera_imgdata.c
 
 ARCHCPUFLAGS += -mcpu=cortex-m33+nodsp -mthumb
 ARCHCPUFLAGS += -mfpu=fpv5-sp-d16 -mfloat-abi=hard -mcmse

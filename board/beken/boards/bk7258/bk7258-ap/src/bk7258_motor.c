@@ -16,7 +16,7 @@
 #include <nuttx/signal.h>
 #include <nuttx/timers/pwm.h>
 
-#include "board.h"
+#include <arch/board/board.h>
 
 #define BK7258_KEY_POLL_US       5000
 #define BK7258_KEY_DEBOUNCE_COUNT 6

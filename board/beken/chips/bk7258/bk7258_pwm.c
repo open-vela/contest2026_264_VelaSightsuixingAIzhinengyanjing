@@ -13,6 +13,7 @@
 #include <nuttx/timers/pwm.h>
 
 #include "arm_internal.h"
+#include "bk7258_gpio.h"
 
 #define BK7258_SYS_CLKSEL             0x44010020u
 #define BK7258_SYS_CLK_ENABLE         0x44010030u

@@ -52,6 +52,12 @@ static const struct mpu_region_s g_bk7258_mpu_regions[] =
     MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_INNER,
     MPU_RLAR_DEVICE
   },
+  {
+    BK7258_PSRAM_BASE,
+    BK7258_PSRAM_SIZE,
+    MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_INNER,
+    MPU_RLAR_NONCACHEABLE
+  },
 };
 
 static void __attribute__((used, noinline, noreturn,
