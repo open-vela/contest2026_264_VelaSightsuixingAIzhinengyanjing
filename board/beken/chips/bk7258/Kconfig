@@ -19,14 +19,33 @@ config BK7258_CPU_FREQ_HZ
 		CPU1 frequency used by the SysTick lower-half during initial
 		bring-up. Runtime DVFS is intentionally unsupported.
 
-config BK7258_MBOX_LOG_BUFSIZE
-	int "AP Mailbox log buffer size"
+config BK7258_MBOX_V2
+	bool
+	default y
+
+config BK7258_MB_UART0_TXBUFSIZE
+	int "Mailbox UART0 transport TX ring size"
 	default 8192
-	range 1024 32768
+	range 1024 32767
+	depends on BK7258_MBOX_V2
 	help
-		Static AP log buffer used before and after the Mailbox transport is
-		ready. Early logs are replayed through the existing CP MB_UART0
-		endpoint once transport initialization completes.
+		AP-owned byte ring. The fixed wire exchange chunk remains 128 bytes.
+
+config BK7258_MB_UART0_RXBUFSIZE
+	int "Mailbox UART0 transport RX capacity"
+	default 256
+	range 256 4096
+	depends on BK7258_MBOX_V2
+
+config BK7258_MB_UART0_SERIAL_RXBUFSIZE
+	int "Mailbox UART0 NuttX serial RX buffer size"
+	default 256
+	depends on BK7258_MBOX_V2
+
+config BK7258_MB_UART0_SERIAL_TXBUFSIZE
+	int "Mailbox UART0 NuttX serial TX buffer size"
+	default 512
+	depends on BK7258_MBOX_V2
 
 config BK7258_PSRAM
 	bool "BK7258 CP-managed PSRAM"

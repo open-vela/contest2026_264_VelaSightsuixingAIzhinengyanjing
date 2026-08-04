@@ -15,6 +15,7 @@ CHIP_CSRCS += bk7258_syslog.c
 CHIP_CSRCS += bk7258_serial.c
 CHIP_CSRCS += bk7258_mbox0.c
 CHIP_CSRCS += bk7258_mailbox_channel.c
+CHIP_CSRCS += bk7258_mb_uart.c
 CHIP_CSRCS += bk7258_pm_pwc.c
 CHIP_CSRCS += bk7258_psram.c
 CHIP_CSRCS += bk7258_allocateheap.c
@@ -33,3 +34,8 @@ ARCHINCLUDES += ${shell $(INCDIR) $(INCDIROPT) "$(CC)" $(CHIP_DIR)/hardware}
 
 CFLAGS += -I$(TOPDIR)/arch/arm/src/chip/include
 CFLAGS += -I$(TOPDIR)/arch/arm/src/chip/hardware
+
+BK7258_SWAP_CHECK := $(shell sh $(CHIP_DIR)/check_swap_layout.sh || echo failed)
+ifneq ($(BK7258_SWAP_CHECK),)
+$(error BK7258 app_ab SWAP layout validation failed)
+endif

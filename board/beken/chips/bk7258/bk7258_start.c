@@ -10,12 +10,14 @@
 #include <stdbool.h>
 
 #include <nuttx/init.h>
+#include <nuttx/syslog/syslog.h>
 
 #include "arm_internal.h"
 #include "mpu.h"
 #include "nvic.h"
 
 #include "hardware/bk7258_memorymap.h"
+#include "hardware/bk7258_mbox.h"
 #include "hardware/bk7258_psram.h"
 
 #if defined(CONFIG_BK7258_PSRAM) && \
@@ -49,6 +51,24 @@ static const struct mpu_region_s g_bk7258_mpu_regions[] =
   {
     BK7258_AP_RAM_BASE,
     BK7258_AP_RAM_SIZE,
+    MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_INNER,
+    MPU_RLAR_NONCACHEABLE
+  },
+  {
+    BK7258_CP_RAM_START,
+    BK7258_CP_RAM_END - BK7258_CP_RAM_START,
+    MPU_RBAR_XN | MPU_RBAR_AP_RORO | MPU_RBAR_SH_INNER,
+    MPU_RLAR_NONCACHEABLE
+  },
+  {
+    BK7258_MB_UART_RX_ADDRESS,
+    BK7258_MB_UART_CHUNK_SIZE,
+    MPU_RBAR_XN | MPU_RBAR_AP_RORO | MPU_RBAR_SH_INNER,
+    MPU_RLAR_NONCACHEABLE
+  },
+  {
+    BK7258_MB_UART_TX_ADDRESS,
+    BK7258_MB_UART_CHUNK_SIZE,
     MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_INNER,
     MPU_RLAR_NONCACHEABLE
   },
@@ -126,11 +146,32 @@ bk7258_start(void)
   (void)bk7258_syslog_initialize();
 
 #ifdef CONFIG_ARM_MPU
-  mpu_reset();
-  mpu_initialize(g_bk7258_mpu_regions,
-                 sizeof(g_bk7258_mpu_regions) /
-                 sizeof(g_bk7258_mpu_regions[0]),
-                 false, true);
+  {
+    const size_t region_count = sizeof(g_bk7258_mpu_regions) /
+                                sizeof(g_bk7258_mpu_regions[0]);
+    const uint32_t hardware_regions =
+      (getreg32(MPU_TYPE) & MPU_TYPE_DREGION_MASK) >>
+      MPU_TYPE_DREGION_SHIFT;
+
+    if (hardware_regions < region_count)
+      {
+        /* A missing shared-memory region would silently widen privileged
+         * access through PRIVDEFENA.  Refuse to boot rather than claim
+         * permissions that the hardware did not install.
+         */
+
+        syslog(LOG_ERR, "BK7258 MPU has %lu regions, needs %zu\n",
+               (unsigned long)hardware_regions, region_count);
+        for (; ; )
+          {
+          }
+      }
+
+    syslog(LOG_INFO, "BK7258 MPU regions=%zu/%lu, shared RX RO TX RW\n",
+           region_count, (unsigned long)hardware_regions);
+    mpu_reset();
+    mpu_initialize(g_bk7258_mpu_regions, region_count, false, true);
+  }
 #endif
 
 #ifdef USE_EARLYSERIALINIT

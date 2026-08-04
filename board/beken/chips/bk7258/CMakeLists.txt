@@ -12,6 +12,7 @@ set(SRCS
     bk7258_serial.c
     bk7258_mbox0.c
     bk7258_mailbox_channel.c
+    bk7258_mb_uart.c
     bk7258_pm_pwc.c
     bk7258_psram.c
     bk7258_allocateheap.c
@@ -54,3 +55,10 @@ endif()
 set_property(TARGET nuttx_target_interface APPEND PROPERTY ALL_TARGETS
              bk7258_chip)
 file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/targets "bk7258_chip\n")
+
+execute_process(
+  COMMAND sh ${NUTTX_CHIP_ABS_DIR}/check_swap_layout.sh
+  RESULT_VARIABLE BK7258_SWAP_CHECK_RESULT)
+if(NOT BK7258_SWAP_CHECK_RESULT EQUAL 0)
+  message(FATAL_ERROR "BK7258 app_ab SWAP layout validation failed")
+endif()

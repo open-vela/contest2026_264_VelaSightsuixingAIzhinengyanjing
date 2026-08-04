@@ -11,6 +11,7 @@
 #include <arch/board/board.h>
 
 #include "bk7258_psram.h"
+#include "hardware/bk7258_mbox.h"
 
 int bk7258_pwc_start(void);
 int bk7258_motor_setup(void);
@@ -30,6 +31,16 @@ int bk7258_bringup(void)
     {
       return ret;
     }
+
+  ret = bk7258_mailbox_wait_link_ready(1000);
+  if (ret < 0)
+    {
+      printf("mailbox UART0 STATE probe failed, error=%d\n", ret);
+      bk7258_mailbox_dump_stats();
+      return ret;
+    }
+
+  printf("mailbox UART0 link ready\n");
 
   ret = bk7258_pwc_start();
   if (ret < 0)

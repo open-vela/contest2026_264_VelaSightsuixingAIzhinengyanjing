@@ -12,29 +12,54 @@
 └── bk_avdk_smp/
 ```
 
-构建前，需要使用比赛仓中已验证的完整文件覆盖`bk_avdk_smp`原文件：
+构建前，需要将比赛仓`external/bk_avdk_smp/`中的权威覆盖文件同步到
+`bk_avdk_smp`。完整文件清单、可直接执行的同步脚本、逐字节校验、OpenVela AP
+构建、CP构建和最终固件打包步骤见`external/bk_avdk_smp/README.md`。Git协作和
+提交规则见`github开发指南.md`。
 
-```text
-external/bk_avdk_smp/cp/middleware/driver/common/driver.c
-  -> bk_avdk_smp/cp/middleware/driver/common/driver.c
+## UART0控制台使用
 
-external/bk_avdk_smp/projects/app_ab/partitions/bk7258/ram_regions.csv
-  -> bk_avdk_smp/projects/app_ab/partitions/bk7258/ram_regions.csv
-```
-
-从工作区根目录执行：
+连接开发板UART0：
 
 ```bash
-cp \
-  "contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp/cp/middleware/driver/common/driver.c" \
-  "bk_avdk_smp/cp/middleware/driver/common/driver.c"
-
-cp \
-  "contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp/projects/app_ab/partitions/bk7258/ram_regions.csv" \
-  "bk_avdk_smp/projects/app_ab/partitions/bk7258/ram_regions.csv"
+picocom --no-escape -b 115200 --flow n --parity n --databits 8 /dev/ttyUSB0
 ```
 
-覆盖前请备份原文件。详细OpenVela构建、CP构建和最终固件打包步骤见`github开发与构建指南.md`及`external/bk_avdk_smp/README.md`。
+CP启动后可先查看AP链路状态，再进入AP的OpenVela NSH控制台：
+
+```text
+ap_console status
+ap_console open
+```
+
+进入AP控制台后可以直接执行NSH命令，例如：
+
+```text
+help
+uname -a
+ps
+free
+ctrlc_test
+```
+
+`ctrlc_test`会持续等待TTY `SIGINT`。按`Ctrl-C`后应打印
+`ctrlc_test received SIGINT`并返回NSH提示符。
+
+AP控制台支持方向键、Home、End、Delete、Backspace、命令历史，以及
+`Ctrl-A`、`Ctrl-B`、`Ctrl-D`、`Ctrl-E`、`Ctrl-F`、`Ctrl-H`、`Ctrl-K`、
+`Ctrl-L`、`Ctrl-N`、`Ctrl-P`和`Ctrl-U`等CLE快捷键。
+
+退出AP控制台并返回CP命令行时，严格按以下顺序操作：
+
+1. 按下`Ctrl-]`。
+2. 松开按键。
+3. 再按`.`。
+
+返回CP命令行后可再次检查状态：
+
+```text
+ap_console status
+```
 
 ## 主要目录
 

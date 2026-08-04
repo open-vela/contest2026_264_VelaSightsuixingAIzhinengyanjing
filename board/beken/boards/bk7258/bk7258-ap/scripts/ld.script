@@ -22,6 +22,7 @@ MEMORY
 {
   FLASH (rx)  : ORIGIN = 0x02150000, LENGTH = 0x00110000
   RAM   (rwx) : ORIGIN = 0x28010000, LENGTH = 0x00054000
+  SWAP  (rw)  : ORIGIN = 0x2809f800, LENGTH = 0x00000800
   PSRAM_SECTION (rw) : ORIGIN = 0x60a00000, LENGTH = 0x00600000
 }
 
@@ -107,6 +108,13 @@ SECTIONS
     __idle_stack_top = .;
   } > RAM
 
+  .swap (NOLOAD) : ALIGN(32)
+  {
+    __swap_start = .;
+    KEEP(*(.swap .swap.*))
+    __swap_end = ORIGIN(SWAP) + LENGTH(SWAP);
+  } > SWAP
+
   .psram.data : ALIGN(8)
   {
     __ap_psram_data_start = .;
@@ -152,6 +160,11 @@ SECTIONS
   ASSERT(_ebss <= __ap_ram_end, "AP bss overlaps CP RAM")
   ASSERT(__heap_start < __heap_end, "AP heap is empty")
   ASSERT(__heap_end <= __ap_ram_end, "AP heap overlaps CP RAM")
+  ASSERT(ORIGIN(SWAP) == 0x2809f800, "app_ab SWAP base mismatch")
+  ASSERT(LENGTH(SWAP) == 0x00000800, "app_ab SWAP size mismatch")
+  ASSERT(ADDR(.swap) == ORIGIN(SWAP), "SWAP section base mismatch")
+  ASSERT(SIZEOF(.swap) == 0, "AP must not allocate objects in shared SWAP")
+  ASSERT(__heap_end <= ORIGIN(SWAP), "AP heap overlaps shared SWAP")
   ASSERT(ORIGIN(PSRAM_SECTION) == 0x60a00000,
          "AP PSRAM section base mismatch")
   ASSERT(LENGTH(PSRAM_SECTION) == 0x00600000,

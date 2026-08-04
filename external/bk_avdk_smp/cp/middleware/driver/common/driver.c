@@ -42,125 +42,486 @@
 #if CONFIG_MAILBOX
 #include <driver/mb_uart_driver.h>
 #include <driver/mb_chnl_buff.h>
+#include <components/ap_console_bridge.h>
 #include <components/shell_task.h>
+#include "mbox0_adapter.h"
 
-#define AP_UART0_LOG_LINE_SIZE 256
-#define AP_UART0_LOG_RETRY_MAX 3
-#define AP_UART0_LOG_RETRY_MS  10
-#define AP_UART0_LOG_FLUSH_MS  50
+#define AP_BRIDGE_TAG              "ap_bridge"
+#define AP_BRIDGE_TX_RING_SIZE     1024
+#define AP_BRIDGE_LOG_LINE_SIZE    256
+#define AP_BRIDGE_LOG_FLUSH_MS     50
+#define AP_BRIDGE_LOG_RETRY_MAX    3
+#define AP_BRIDGE_LOG_RETRY_MS     10
+#define AP_BRIDGE_EVENT_RX         0x01
+#define AP_BRIDGE_EVENT_TX         0x02
+#define AP_BRIDGE_EVENT_MODE       0x04
+#define AP_BRIDGE_EVENT_DOWN       0x08
+#define AP_BRIDGE_EVENT_RESET      0x10
+#define AP_BRIDGE_EVENT_TIMEOUT    0x20
+#define AP_BRIDGE_EVENT_READY      0x40
+#define AP_BRIDGE_EVENT_SYSTEM     0x80
+#define AP_BRIDGE_READY_ALL        (AP_BRIDGE_READY_MBUART | \
+				    AP_BRIDGE_READY_IPC | AP_BRIDGE_READY_PWC)
+#define AP_BRIDGE_MODE_TIMEOUT_MS  200
 
-static beken_semaphore_t s_ap_uart0_log_sem;
-static beken_thread_t s_ap_uart0_log_thread;
-static volatile uint32_t s_ap_uart0_log_write_fail;
+typedef struct {
+	beken_semaphore_t sem;
+	beken_thread_t thread;
+	beken_mutex_t tx_mutex;
+	beken_semaphore_t mode_sem;
+	u8 tx_ring[AP_BRIDGE_TX_RING_SIZE];
+	u16 tx_rd;
+	u16 tx_wr;
+	volatile u32 events;
+	volatile u8 link_ready;
+	volatile u8 output_mode;
+	volatile u8 requested_mode;
+	volatile u8 ready_flags;
+	volatile u8 ready_set;
+	volatile u8 ready_clear;
+	volatile u32 mode_generation;
+	volatile u32 mode_applied_generation;
+	u32 last_down_log_ms;
+	ap_console_bridge_stats_t stats;
+} ap_bridge_cb_t;
 
-static void ap_uart0_log_output(const uint8_t *line, u16 length)
+static ap_bridge_cb_t s_ap_bridge;
+
+static void ap_bridge_wake(u32 event)
 {
-	static const uint8_t prefix[] = "ap0: ";
-	uint8_t output[sizeof(prefix) - 1 + AP_UART0_LOG_LINE_SIZE];
+	u32 flags = rtos_disable_int();
+	s_ap_bridge.events |= event;
+	rtos_enable_int(flags);
+	(void)rtos_set_semaphore(&s_ap_bridge.sem);
+}
+
+static void ap_bridge_mb_rx(void *param)
+{
+	(void)param;
+	ap_bridge_wake(AP_BRIDGE_EVENT_RX);
+}
+
+static void ap_bridge_mb_tx(void *param)
+{
+	(void)param;
+	ap_bridge_wake(AP_BRIDGE_EVENT_TX);
+}
+
+static void ap_bridge_mb_event(u8 id, mb_uart_event_t event, void *param)
+{
+	(void)id;
+	(void)param;
+
+	if (event == MB_UART_EVENT_READY)
+		ap_console_bridge_ready_update(AP_BRIDGE_READY_MBUART, true);
+	else if (event == MB_UART_EVENT_PEER_RESET)
+	{
+		ap_bridge_wake(AP_BRIDGE_EVENT_RESET);
+		ap_console_bridge_ready_update(AP_BRIDGE_READY_MBUART, false);
+	}
+	else if (event == MB_UART_EVENT_TIMEOUT)
+	{
+		ap_bridge_wake(AP_BRIDGE_EVENT_TIMEOUT);
+		ap_console_bridge_ready_update(AP_BRIDGE_READY_MBUART, false);
+	}
+	else
+	{
+		ap_bridge_wake(AP_BRIDGE_EVENT_DOWN);
+		ap_console_bridge_ready_update(AP_BRIDGE_READY_MBUART, false);
+	}
+}
+
+static void ap_bridge_log_output(const u8 *line, u16 length, bool prefix_line)
+{
+	static const u8 prefix[] = "ap0: ";
+	u8 output[sizeof(prefix) - 1 + AP_BRIDGE_LOG_LINE_SIZE];
 	u16 output_length;
 	u8 retry;
 
-	memcpy(output, prefix, sizeof(prefix) - 1);
-	memcpy(output + sizeof(prefix) - 1, line, length);
-	output_length = sizeof(prefix) - 1 + length;
-
-	for (retry = 0; retry < AP_UART0_LOG_RETRY_MAX; retry++)
+	output_length = 0;
+	if (prefix_line)
+	{
+		memcpy(output, prefix, sizeof(prefix) - 1);
+		output_length = sizeof(prefix) - 1;
+	}
+	memcpy(output + output_length, line, length);
+	output_length += length;
+	for (retry = 0; retry < AP_BRIDGE_LOG_RETRY_MAX; retry++)
 	{
 		if (shell_log_raw_data(output, output_length))
-		{
 			return;
+		rtos_delay_milliseconds(AP_BRIDGE_LOG_RETRY_MS);
+	}
+	s_ap_bridge.stats.rx_queue_fail++;
+}
+
+static u16 ap_bridge_tx_count(void)
+{
+	if (s_ap_bridge.tx_rd <= s_ap_bridge.tx_wr)
+		return s_ap_bridge.tx_wr - s_ap_bridge.tx_rd;
+	return sizeof(s_ap_bridge.tx_ring) - (s_ap_bridge.tx_rd - s_ap_bridge.tx_wr);
+}
+
+static void ap_bridge_drain_tx(void)
+{
+	u8 data[MB_CHNL_BUFF_LEN];
+	u16 count;
+	u16 length;
+	u16 written;
+	u16 i;
+
+	while (s_ap_bridge.link_ready)
+	{
+		rtos_lock_mutex(&s_ap_bridge.tx_mutex);
+		count = ap_bridge_tx_count();
+		if (!count)
+		{
+			rtos_unlock_mutex(&s_ap_bridge.tx_mutex);
+			break;
+		}
+		length = MIN(count, (u16)sizeof(data));
+		length = MIN(length, bk_mb_uart_write_ready(MB_UART0));
+		if (!length)
+		{
+			rtos_unlock_mutex(&s_ap_bridge.tx_mutex);
+			break;
 		}
 
-		rtos_delay_milliseconds(AP_UART0_LOG_RETRY_MS);
+		for (i = 0; i < length; i++)
+			data[i] = s_ap_bridge.tx_ring[(s_ap_bridge.tx_rd + i) %
+							 sizeof(s_ap_bridge.tx_ring)];
+
+		written = bk_mb_uart_write(MB_UART0, data, length);
+		if (!written)
+		{
+			rtos_unlock_mutex(&s_ap_bridge.tx_mutex);
+			break;
+		}
+		if (written < length)
+			s_ap_bridge.stats.tx_partial++;
+
+		s_ap_bridge.tx_rd = (s_ap_bridge.tx_rd + written) %
+					 sizeof(s_ap_bridge.tx_ring);
+		s_ap_bridge.stats.tx_bytes += written;
+		rtos_unlock_mutex(&s_ap_bridge.tx_mutex);
 	}
-
-	s_ap_uart0_log_write_fail++;
 }
 
-static void ap_uart0_log_rx(void *param)
+static void ap_bridge_task(beken_thread_arg_t arg)
 {
-	(void)param;
-	(void)rtos_set_semaphore(&s_ap_uart0_log_sem);
-}
-
-static void ap_uart0_log_task(beken_thread_arg_t arg)
-{
-	uint8_t input[MB_CHNL_BUFF_LEN];
-	uint8_t line[AP_UART0_LOG_LINE_SIZE];
+	u8 input[MB_CHNL_BUFF_LEN];
+	u8 line[AP_BRIDGE_LOG_LINE_SIZE];
 	u16 line_length = 0;
+	u8 active_mode = AP_CONSOLE_OUTPUT_LOG;
+	bool line_continues = false;
 
 	(void)arg;
 	for (;;)
 	{
+		u32 events;
+		u32 flags;
 		u16 input_length;
 		u16 index;
-		bk_err_t ret;
+		u8 ready_set;
+		u8 ready_clear;
+		u8 ready_before;
+		bk_err_t ret = rtos_get_semaphore(&s_ap_bridge.sem,
+			line_length ? AP_BRIDGE_LOG_FLUSH_MS : 20);
 
-		ret = rtos_get_semaphore(&s_ap_uart0_log_sem,
-						 line_length ? AP_UART0_LOG_FLUSH_MS : BEKEN_WAIT_FOREVER);
-		if (ret == kTimeoutErr)
+		bk_mb_uart_poll(MB_UART0);
+
+		flags = rtos_disable_int();
+		events = s_ap_bridge.events;
+		s_ap_bridge.events = 0;
+		ready_set = s_ap_bridge.ready_set;
+		ready_clear = s_ap_bridge.ready_clear;
+		ready_before = s_ap_bridge.ready_flags;
+		s_ap_bridge.ready_set = 0;
+		s_ap_bridge.ready_clear = 0;
+		rtos_enable_int(flags);
+
+		if (events & (AP_BRIDGE_EVENT_DOWN | AP_BRIDGE_EVENT_RESET |
+			      AP_BRIDGE_EVENT_TIMEOUT))
 		{
-			ap_uart0_log_output(line, line_length);
+			ready_clear |= AP_BRIDGE_READY_MBUART;
+		}
+		s_ap_bridge.ready_flags |= ready_set;
+		s_ap_bridge.ready_flags &= ~ready_clear;
+		/* poll() may complete recovery in the same iteration that consumes an
+		 * older timeout/reset event.  The driver's current state is the final
+		 * authority for the MBUART gate, so a stale event cannot clear a newer
+		 * READY notification permanently.
+		 */
+		if (bk_mb_uart_is_link_ready(MB_UART0))
+			s_ap_bridge.ready_flags |= AP_BRIDGE_READY_MBUART;
+		else
+			s_ap_bridge.ready_flags &= ~AP_BRIDGE_READY_MBUART;
+		s_ap_bridge.link_ready =
+			(s_ap_bridge.ready_flags & AP_BRIDGE_READY_ALL) ==
+			AP_BRIDGE_READY_ALL && bk_mb_uart_is_link_ready(MB_UART0);
+
+		if (s_ap_bridge.mode_applied_generation !=
+			s_ap_bridge.mode_generation)
+		{
+			if (line_length)
+				ap_bridge_log_output(line, line_length, !line_continues);
 			line_length = 0;
-			continue;
+			line_continues = false;
+			active_mode = s_ap_bridge.requested_mode;
+			s_ap_bridge.output_mode = active_mode;
+			s_ap_bridge.mode_applied_generation =
+				s_ap_bridge.mode_generation;
+			rtos_set_semaphore(&s_ap_bridge.mode_sem);
 		}
 
 		do
 		{
 			input_length = bk_mb_uart_read(MB_UART0, input, sizeof(input));
+			s_ap_bridge.stats.rx_bytes += input_length;
+			if (active_mode == AP_CONSOLE_OUTPUT_RAW)
+			{
+				if (input_length && !shell_log_raw_data(input, input_length))
+					s_ap_bridge.stats.rx_queue_fail++;
+				continue;
+			}
+
 			for (index = 0; index < input_length; index++)
 			{
 				line[line_length++] = input[index];
 				if (input[index] == '\n' || line_length == sizeof(line))
 				{
-					ap_uart0_log_output(line, line_length);
+					bool complete = input[index] == '\n';
+
+					ap_bridge_log_output(line, line_length,
+							     !line_continues);
 					line_length = 0;
+					line_continues = !complete;
 				}
 			}
 		} while (input_length != 0);
+
+		if (ret == kTimeoutErr && line_length &&
+			active_mode == AP_CONSOLE_OUTPUT_LOG)
+		{
+			ap_bridge_log_output(line, line_length, !line_continues);
+			line_length = 0;
+			line_continues = true;
+		}
+
+		ap_bridge_drain_tx();
+
+		if (events & (AP_BRIDGE_EVENT_DOWN | AP_BRIDGE_EVENT_RESET |
+			      AP_BRIDGE_EVENT_TIMEOUT))
+		{
+			u32 now = rtos_get_time();
+
+			s_ap_bridge.stats.link_down++;
+			if (events & AP_BRIDGE_EVENT_RESET)
+				s_ap_bridge.stats.reset++;
+			if (events & AP_BRIDGE_EVENT_TIMEOUT)
+				s_ap_bridge.stats.timeout++;
+			if ((ready_before & (AP_BRIDGE_READY_IPC |
+					     AP_BRIDGE_READY_PWC)) ==
+				(AP_BRIDGE_READY_IPC | AP_BRIDGE_READY_PWC) &&
+				(u32)(now - s_ap_bridge.last_down_log_ms) >= 1000)
+			{
+				s_ap_bridge.last_down_log_ms = now;
+				BK_LOGW(AP_BRIDGE_TAG,
+					"link down event=%x queued=%u ready=%x\r\n",
+					events, ap_bridge_tx_count(),
+					s_ap_bridge.ready_flags);
+			}
+			shell_ap_console_link_down();
+		}
 	}
 }
 
-static bk_err_t ap_uart0_log_init(void)
+bk_err_t ap_console_bridge_init(void)
 {
 	bk_err_t ret;
 
-	ret = rtos_init_semaphore(&s_ap_uart0_log_sem, 1);
+	memset(&s_ap_bridge, 0, sizeof(s_ap_bridge));
+	ret = bk_pm_module_vote_sleep_ctrl(PM_SLEEP_MODULE_NAME_MAILBOX, 0, 0);
 	if (ret != BK_OK)
-	{
 		return ret;
-	}
+	ret = rtos_init_mutex(&s_ap_bridge.tx_mutex);
+	if (ret != BK_OK)
+		goto init_fail_vote;
+	ret = rtos_init_semaphore(&s_ap_bridge.sem, 1);
+	if (ret != BK_OK)
+		goto init_fail_mutex;
+	ret = rtos_init_semaphore(&s_ap_bridge.mode_sem, 1);
+	if (ret != BK_OK)
+		goto init_fail_sem;
 
-	ret = rtos_create_thread(&s_ap_uart0_log_thread,
+	ret = rtos_create_thread(&s_ap_bridge.thread,
 					 BEKEN_DEFAULT_WORKER_PRIORITY,
-					 "ap_uart0_log", ap_uart0_log_task, 2048, NULL);
+					 "ap_console", ap_bridge_task, 3072, NULL);
 	if (ret != BK_OK)
 	{
-		rtos_deinit_semaphore(&s_ap_uart0_log_sem);
-		return ret;
+		rtos_deinit_semaphore(&s_ap_bridge.mode_sem);
+		rtos_deinit_semaphore(&s_ap_bridge.sem);
+		goto init_fail_mutex;
 	}
 
 	ret = bk_mb_uart_dev_init(MB_UART0);
 	if (ret != BK_OK)
 	{
-		rtos_delete_thread(&s_ap_uart0_log_thread);
-		rtos_deinit_semaphore(&s_ap_uart0_log_sem);
-		return ret;
+		rtos_delete_thread(&s_ap_bridge.thread);
+		rtos_deinit_semaphore(&s_ap_bridge.mode_sem);
+		rtos_deinit_semaphore(&s_ap_bridge.sem);
+		goto init_fail_mutex;
 	}
 
-	ret = bk_mb_uart_register_rx_isr(MB_UART0, ap_uart0_log_rx, NULL);
+	ret = bk_mb_uart_register_rx_isr(MB_UART0, ap_bridge_mb_rx, NULL);
+	if (ret == BK_OK)
+		ret = bk_mb_uart_register_tx_isr(MB_UART0, ap_bridge_mb_tx, NULL);
+	if (ret == BK_OK)
+		ret = bk_mb_uart_register_event_callback(MB_UART0, ap_bridge_mb_event, NULL);
 	if (ret != BK_OK)
 	{
 		bk_mb_uart_dev_deinit(MB_UART0);
-		rtos_delete_thread(&s_ap_uart0_log_thread);
-		rtos_deinit_semaphore(&s_ap_uart0_log_sem);
-		return ret;
+		rtos_delete_thread(&s_ap_bridge.thread);
+		rtos_deinit_semaphore(&s_ap_bridge.mode_sem);
+		rtos_deinit_semaphore(&s_ap_bridge.sem);
+		goto init_fail_mutex;
 	}
 
-	/* Drain data that may have arrived between channel open and callback
-	 * registration. The binary semaphore intentionally coalesces wakeups. */
-	(void)rtos_set_semaphore(&s_ap_uart0_log_sem);
+	ap_bridge_wake(AP_BRIDGE_EVENT_RX | AP_BRIDGE_EVENT_TX);
+	BK_LOGI(AP_BRIDGE_TAG, "init owner=MB_UART0 tx_ring=%u mode=LOG\r\n",
+		(unsigned)sizeof(s_ap_bridge.tx_ring));
 	return BK_OK;
+
+init_fail_sem:
+	rtos_deinit_semaphore(&s_ap_bridge.sem);
+init_fail_mutex:
+	rtos_deinit_mutex(&s_ap_bridge.tx_mutex);
+init_fail_vote:
+	bk_pm_module_vote_sleep_ctrl(PM_SLEEP_MODULE_NAME_MAILBOX, 1, 0);
+	return ret;
+}
+
+u16 ap_console_bridge_write(const u8 *data, u16 length)
+{
+	u16 written = 0;
+
+	if (!data || !length || !s_ap_bridge.link_ready)
+		return 0;
+
+	rtos_lock_mutex(&s_ap_bridge.tx_mutex);
+	while (written < length)
+	{
+		u16 next = (s_ap_bridge.tx_wr + 1) % sizeof(s_ap_bridge.tx_ring);
+		if (next == s_ap_bridge.tx_rd)
+			break;
+		s_ap_bridge.tx_ring[s_ap_bridge.tx_wr] = data[written++];
+		s_ap_bridge.tx_wr = next;
+	}
+	rtos_unlock_mutex(&s_ap_bridge.tx_mutex);
+	if (written < length)
+	{
+		s_ap_bridge.stats.tx_drop += length - written;
+	}
+	if (written)
+		ap_bridge_wake(AP_BRIDGE_EVENT_TX);
+	return written;
+}
+
+void ap_console_bridge_purge_tx(void)
+{
+	rtos_lock_mutex(&s_ap_bridge.tx_mutex);
+	s_ap_bridge.stats.tx_drop += ap_bridge_tx_count();
+	s_ap_bridge.tx_rd = s_ap_bridge.tx_wr;
+	rtos_unlock_mutex(&s_ap_bridge.tx_mutex);
+}
+
+bk_err_t ap_console_bridge_set_output_mode(ap_console_output_mode_t mode)
+{
+	u32 generation;
+
+	if (mode > AP_CONSOLE_OUTPUT_RAW)
+		return BK_ERR_PARAM;
+	s_ap_bridge.requested_mode = mode;
+	generation = ++s_ap_bridge.mode_generation;
+	ap_bridge_wake(AP_BRIDGE_EVENT_MODE);
+	while (s_ap_bridge.mode_applied_generation != generation)
+	{
+		if (rtos_get_semaphore(&s_ap_bridge.mode_sem,
+				       AP_BRIDGE_MODE_TIMEOUT_MS) != BK_OK)
+			return BK_ERR_TIMEOUT;
+	}
+	return BK_OK;
+}
+
+bool ap_console_bridge_is_ready(void)
+{
+	return s_ap_bridge.link_ready;
+}
+
+void ap_console_bridge_get_stats(ap_console_bridge_stats_t *stats)
+{
+	mb_chnl_diag_t diag;
+	mbox0_adapter_diag_t adapter;
+
+	if (!stats)
+		return;
+	*stats = s_ap_bridge.stats;
+	rtos_lock_mutex(&s_ap_bridge.tx_mutex);
+	stats->tx_queued = ap_bridge_tx_count();
+	rtos_unlock_mutex(&s_ap_bridge.tx_mutex);
+	stats->mb_tx_free = bk_mb_uart_write_ready(MB_UART0);
+	stats->mb_rx_ready = bk_mb_uart_read_ready(MB_UART0);
+	stats->mb_status = bk_mb_uart_get_status(MB_UART0);
+	stats->link_ready = ap_console_bridge_is_ready();
+	stats->output_mode = s_ap_bridge.output_mode;
+	stats->ready_flags = s_ap_bridge.ready_flags;
+	stats->transport_state = bk_mb_uart_get_link_state(MB_UART0);
+	bk_mailbox_get_diag(&adapter);
+	stats->bad_envelope = adapter.bad_sid + adapter.bad_length +
+		adapter.bad_alignment + adapter.bad_address +
+		adapter.descriptor_overflow;
+	if (mb_chnl_get_diag(MAILBOX_CPU1, &diag) == BK_OK)
+	{
+		stats->active_busy = diag.busy;
+		stats->active_channel = diag.logical_chnl;
+		stats->active_sequence = diag.sequence;
+		stats->active_command = diag.command;
+		stats->ack_retry = diag.ack_retry;
+		stats->ack_queue_full = diag.ack_queue_full;
+		stats->reset_bad = diag.reset_bad;
+	}
+}
+
+void ap_console_bridge_ready_update(ap_console_ready_flag_t flag, bool ready)
+{
+	u32 flags = rtos_disable_int();
+
+	if (ready)
+	{
+		s_ap_bridge.ready_set |= flag;
+		s_ap_bridge.ready_clear &= ~flag;
+	}
+	else
+	{
+		s_ap_bridge.ready_clear |= flag;
+		s_ap_bridge.ready_set &= ~flag;
+		s_ap_bridge.link_ready = 0;
+	}
+	rtos_enable_int(flags);
+	if (ready && (flag & (AP_BRIDGE_READY_IPC | AP_BRIDGE_READY_PWC)) &&
+		!bk_mb_uart_is_link_ready(MB_UART0))
+		bk_mb_uart_probe(MB_UART0);
+	ap_bridge_wake(AP_BRIDGE_EVENT_SYSTEM);
+}
+
+void ap_console_bridge_link_down(void)
+{
+	u32 flags = rtos_disable_int();
+	s_ap_bridge.ready_clear |= AP_BRIDGE_READY_ALL;
+	s_ap_bridge.ready_set = 0;
+	s_ap_bridge.link_ready = 0;
+	rtos_enable_int(flags);
+	ap_bridge_wake(AP_BRIDGE_EVENT_DOWN | AP_BRIDGE_EVENT_SYSTEM);
 }
 #endif
 
@@ -453,7 +814,7 @@ int driver_init(void) {
 	extern bk_err_t ipc_init(void);
 	extern bk_err_t mb_ipc_init(void);
 	ipc_init();
-	if (ap_uart0_log_init() != BK_OK)
+	if (ap_console_bridge_init() != BK_OK)
 	{
 		return BK_FAIL;
 	}

@@ -1,11 +1,40 @@
 /****************************************************************************
- * Contest 2026 team 000 - hello app sample
+ * BK7258 UART Ctrl-C test
  ****************************************************************************/
 
+#include <nuttx/config.h>
+
+#include <signal.h>
 #include <stdio.h>
+#include <unistd.h>
+
+static volatile sig_atomic_t g_sigint_received;
+
+static void ctrlc_test_handler(int signo)
+{
+  g_sigint_received = 1;
+}
 
 int main(int argc, char *argv[])
 {
-  printf("Hello from openvela contest 2026 team 000!\n");
+  struct sigaction act;
+
+  act.sa_handler = ctrlc_test_handler;
+  sigemptyset(&act.sa_mask);
+  act.sa_flags = 0;
+
+  if (sigaction(SIGINT, &act, NULL) < 0)
+    {
+      perror("sigaction");
+      return 1;
+    }
+
+  printf("ctrlc_test running; press Ctrl-C\n");
+  while (!g_sigint_received)
+    {
+      sleep(1);
+    }
+
+  printf("ctrlc_test received SIGINT\n");
   return 0;
 }

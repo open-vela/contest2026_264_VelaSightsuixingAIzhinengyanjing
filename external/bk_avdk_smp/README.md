@@ -8,11 +8,27 @@
 
 | 比赛仓权威副本 | `bk_avdk_smp` 目标文件 | 作用 |
 | --- | --- | --- |
-| `cp/middleware/driver/common/driver.c` | `cp/middleware/driver/common/driver.c` | CP 启动时初始化 PSRAM，并提供 AP 日志转发 |
+| `cp/components/bk_cli/cli_main.c` | `cp/components/bk_cli/cli_main.c` | 注册 `ap_console` CLI 命令 |
+| `cp/components/bk_cli/shell_task.c` | `cp/components/bk_cli/shell_task.c` | UART0 CP_CLI/AP_CONSOLE owner 状态机、延迟切换和退出转义 |
+| `cp/include/components/ap_console_bridge.h` | `cp/include/components/ap_console_bridge.h` | CP UART0 bridge 模式、写入和统计接口 |
+| `cp/include/components/shell_task.h` | `cp/include/components/shell_task.h` | shell 与 bridge 的切换/链路事件接口 |
+| `cp/include/driver/mailbox_channel.h` | `cp/include/driver/mailbox_channel.h` | transport event、诊断和 poll 接口 |
+| `cp/include/driver/mb_uart_driver.h` | `cp/include/driver/mb_uart_driver.h` | MB_UART link event、状态和 poll 接口 |
+| `cp/middleware/driver/common/driver.c` | `cp/middleware/driver/common/driver.c` | MB_UART0 唯一 owner、LOG/RAW RX、1024 B TX ring 和 worker |
+| `cp/middleware/driver/mailbox/mailbox_channel.c` | `cp/middleware/driver/mailbox/mailbox_channel.c` | 完整 ACK 匹配、timeout/reset、probe 和诊断 |
+| `cp/middleware/driver/mailbox/mb_ipc_cmd.c` | `cp/middleware/driver/mailbox/mb_ipc_cmd.c` | IPC power-up ready 门禁事件 |
+| `cp/middleware/driver/mailbox/mb_ipc_heartbeat.c` | `cp/middleware/driver/mailbox/mb_ipc_heartbeat.c` | heartbeat/reset/down 自动回退事件 |
+| `cp/middleware/driver/mailbox/mb_uart_driver.c` | `cp/middleware/driver/mailbox/mb_uart_driver.c` | 严格 DATA/STATE 校验、ACK 后推进和 link event |
+| `cp/middleware/driver/mailbox/mbox0_adapter.c` | `cp/middleware/driver/mailbox/mbox0_adapter.c` | command/ACK/reset/sync 分离稳定 slot |
+| `cp/middleware/driver/mailbox/mbox0_adapter.h` | `cp/middleware/driver/mailbox/mbox0_adapter.h` | 稳定 slot 完成和 quarantine 接口 |
+| `cp/middleware/driver/mailbox/mbox0_drv.c` | `cp/middleware/driver/mailbox/mbox0_drv.c` | RX 资源门禁、FIFO poll 和 destination count |
+| `cp/middleware/driver/mailbox/mbox0_drv.h` | `cp/middleware/driver/mailbox/mbox0_drv.h` | MBOX0 poll、ready callback 和 FIFO count API |
+| `cp/middleware/driver/pwr_clk/pwr_clk.c` | `cp/middleware/driver/pwr_clk/pwr_clk.c` | PWC boot-ready 门禁事件 |
 | `projects/app_ab/partitions/bk7258/ram_regions.csv` | `projects/app_ab/partitions/bk7258/ram_regions.csv` | BK7258 640 KiB Share SRAM 和 16 MiB PSRAM 布局 |
 
-`driver.c`还包含 CP shell 队列串行化、AP 日志按行缓存、`ap0:`来源前缀、
-50 ms 半行刷新和队列提交失败有限重试。
+UART0 bridge 保持 `MB_UART0` 唯一初始化 owner。AP 输出 LOG 模式保留 `ap0:`
+前缀、50 ms 半行刷新和有限重试；RAW 模式不改写字节。PC 到 AP 输入使用
+1024 B 有界 ring 和部分写 worker，所有物理 UART0 输出仍经 shell queue 串行化。
 
 `ram_regions.csv`采用原厂 `lvgl/img_decode`、`lvgl/freetype_font` 的 16 MiB
 七区域布局：
@@ -29,28 +45,57 @@
 从工作区根目录执行：
 
 ```bash
-cp \
-  contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp/cp/middleware/driver/common/driver.c \
-  bk_avdk_smp/cp/middleware/driver/common/driver.c
-
-cp \
-  contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp/projects/app_ab/partitions/bk7258/ram_regions.csv \
-  bk_avdk_smp/projects/app_ab/partitions/bk7258/ram_regions.csv
+mirror=contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp
+for path in \
+  cp/components/bk_cli/cli_main.c \
+  cp/components/bk_cli/shell_task.c \
+  cp/include/components/ap_console_bridge.h \
+  cp/include/components/shell_task.h \
+  cp/include/driver/mailbox_channel.h \
+  cp/include/driver/mb_uart_driver.h \
+  cp/middleware/driver/common/driver.c \
+  cp/middleware/driver/mailbox/mailbox_channel.c \
+  cp/middleware/driver/mailbox/mb_ipc_cmd.c \
+  cp/middleware/driver/mailbox/mb_ipc_heartbeat.c \
+  cp/middleware/driver/mailbox/mb_uart_driver.c \
+  cp/middleware/driver/mailbox/mbox0_adapter.c \
+  cp/middleware/driver/mailbox/mbox0_adapter.h \
+  cp/middleware/driver/mailbox/mbox0_drv.c \
+  cp/middleware/driver/mailbox/mbox0_drv.h \
+  cp/middleware/driver/pwr_clk/pwr_clk.c \
+  projects/app_ab/partitions/bk7258/ram_regions.csv
+do
+  cp "$mirror/$path" "bk_avdk_smp/$path"
+done
 ```
 
 同步后必须逐字节检查：
 
 ```bash
-cmp -s \
-  contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp/cp/middleware/driver/common/driver.c \
-  bk_avdk_smp/cp/middleware/driver/common/driver.c
-
-cmp -s \
-  contest/contest2026_264_VelaSightsuixingAIzhinengyanjing/external/bk_avdk_smp/projects/app_ab/partitions/bk7258/ram_regions.csv \
-  bk_avdk_smp/projects/app_ab/partitions/bk7258/ram_regions.csv
+for path in \
+  cp/components/bk_cli/cli_main.c \
+  cp/components/bk_cli/shell_task.c \
+  cp/include/components/ap_console_bridge.h \
+  cp/include/components/shell_task.h \
+  cp/include/driver/mailbox_channel.h \
+  cp/include/driver/mb_uart_driver.h \
+  cp/middleware/driver/common/driver.c \
+  cp/middleware/driver/mailbox/mailbox_channel.c \
+  cp/middleware/driver/mailbox/mb_ipc_cmd.c \
+  cp/middleware/driver/mailbox/mb_ipc_heartbeat.c \
+  cp/middleware/driver/mailbox/mb_uart_driver.c \
+  cp/middleware/driver/mailbox/mbox0_adapter.c \
+  cp/middleware/driver/mailbox/mbox0_adapter.h \
+  cp/middleware/driver/mailbox/mbox0_drv.c \
+  cp/middleware/driver/mailbox/mbox0_drv.h \
+  cp/middleware/driver/pwr_clk/pwr_clk.c \
+  projects/app_ab/partitions/bk7258/ram_regions.csv
+do
+  cmp -s "$mirror/$path" "bk_avdk_smp/$path" || exit 1
+done
 ```
 
-两个`cmp`都必须返回0。
+全部`cmp`都必须返回0。
 
 ## 3. 正确构建链条
 
@@ -175,41 +220,28 @@ OpenVela AP侧已经完成以下代码和离线构建基线：
 `0x7`响应只回显ON/OFF状态，不能单独证明PHY初始化成功或器件为16 MiB。因此当前
 alias probe是临时运行时门禁，不能替代CP status协议扩展和整颗器件实板测试。
 
-当前OpenVela构建产物为：
-
-```text
-cmake_out/bk7258-ap_nsh/nuttx.bin
-SHA256 185b775f22c4278791b2e1c3bb811ea157df5bfde9085cc7a15824b37ca0a64f
-```
-
-本轮已重新执行`app_ab`项目级clean build。以下三个AP文件完全一致：
+当前OpenVela构建和最终打包使用同一个 AP 输入：
 
 ```text
 cmake_out/bk7258-ap_nsh/nuttx.bin
 bk_avdk_smp/build/openvela-ap.bin
 bk_avdk_smp/projects/app_ab/build/bk7258/app_ab/package/tmp/app1.bin
-SHA256 185b775f22c4278791b2e1c3bb811ea157df5bfde9085cc7a15824b37ca0a64f
+SHA256 133cf4b8e54075bfac6ce70bfc1e042888ce22c1a64cc65742a7ee95653d8b6e
 ```
 
-最终包也已重新生成：
+最终包已使用上述 OpenVela AP 重新生成：
 
 ```text
 all-app.bin SHA256
-cf576afe765743fece43602ca7dba4e1ed496732d77767fed27aed95e0dfbd04
+93e540db51f262fd846620ca4257dfefbe5025f796466ab3fcf9fb6a29c51fe0
 
 app_ab_crc.rbl SHA256
-f89e6f0ad878d3d0908d60f57e0cba6ff65fb662f5f238acf3685db36e572f30
+447f5eca7c0b3dafd6b47223aa1c7327478a9d9f9ca0db030104e5829c44a20c
 ```
 
-本版只修改OpenVela AP，未修改任何CP源码：`git diff --exit-code`对
-`cp/middleware/driver/pwr_clk/pwr_clk.c`和`low_pwr_core.c`均为空。AP侧修复了
-接收非PWC/UART逻辑通道时不回transport ACK导致CP物理通道永久BUSY、进而阻塞
-后续PWC语义响应的问题，与原厂mailbox channel层“无handler仍回COM_FAIL ACK”
-的行为一致。
-
-因此本轮OpenVela PSRAM allocator代码已经进入当前最终可烧录包。这里证明的是
-构建和打包输入一致，不等同于实板PSRAM ID、容量、地址线、PWC和allocator压力
-验收已经通过。
+除AP/CP `-Werror`编译、最终打包和AP输入一致性外，当前固件已在实板验证UART0
+双向桥、IPC/PWC ready、heartbeat、PSRAM、NSH交互、CLE方向键与控制键、TTY
+`Ctrl-C`信号以及AP控制台退出转义。
 
 ## 6. 协作约束
 
@@ -222,7 +254,31 @@ f89e6f0ad878d3d0908d60f57e0cba6ff65fb662f5f238acf3685db36e572f30
   接入与离线构建；尚未完成CP ID/容量query、NSH压力测试、DMA/media lease、实板
   验证和最终包重打包。
 
-## 7. 2026-07-31 验证记录
+## 7. UART0 Mailbox V2 使用和边界
+
+CP 启动后默认 owner 为 `CP_CLI`。只有 MB_UART0 STATE 成功 ACK、IPC power-up 和
+PWC boot-ready 三个条件同时成立，且`bk_mb_uart_write_ready()`非零时，
+`ap_console open`才允许进入。heartbeat timeout、AP reset/power-off 和 Mailbox
+reset/timeout都会清除门禁并请求回退到CP CLI。使用方式：
+
+```text
+ap_console status
+ap_console open
+<RAW AP NSH interaction>
+<press Ctrl-], release it, then press .>
+ap_console status
+```
+
+`open`在当前 CP CLI 响应经 UART TX-complete 后生效，并清 CP parser 和 UART RX；
+RAW 模式不添加前缀。退出时按下`Ctrl-]`、松开，再按`.`；该转义不依赖行首状态。
+链路 reset/timeout/down 时自动清理
+未发送输入并回到 `CP_CLI`。`status`输出 owner/link/mode、bridge ring、MB_UART 状态、
+active channel/sequence/command 和 drop/partial/overflow/reset/timeout 统计。
+
+当前实现未声称以下项目已在实板验证：深睡 resume、AP/CP 独立重启、FIFO/stale ACK
+故障注入和长时间双向压力。这些仍须按移植计划测试矩阵完成。
+
+## 8. 2026-07-31 验证记录
 
 已使用官方 `localhost/bekencorp/armino-idk:1.5` 镜像执行项目级 clean build。
 验证结果：

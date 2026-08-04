@@ -6,10 +6,15 @@ config ARCH_BOARD_BK7258_AP
 	select ARCH_HAVE_BUTTONS
 	select ARCH_HAVE_LEDS
 
-config BK7258_AP_UART1
-	bool "Use UART1 for the AP console"
+config BK7258_MB_UART0_CONSOLE
+	bool "Use CP UART0 through Mailbox V2 for the AP console"
 	default y
 	depends on SERIAL
+	select BK7258_MBOX_V2
+	select OTHER_UART_SERIALDRIVER
+	select OTHER_SERIAL_CONSOLE
+	select SERIAL_IFLOWCONTROL
+	select SERIAL_IFLOWCONTROL_WATERMARKS
 
 config BK7258_POWER_KEY_MOTOR
 	bool "Vibrate while the power key is pressed"

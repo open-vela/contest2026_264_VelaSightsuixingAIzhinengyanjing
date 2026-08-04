@@ -185,11 +185,6 @@ int bk7258_pwc_start(void)
   g_ready_sent = false;
   g_psram_power_waiting = false;
   g_psram_power_state = PM_POWER_MODULE_STATE_OFF;
-  pid = bk7258_mailbox_init();
-  if (pid < 0)
-    {
-      return pid;
-    }
   bk7258_mailbox_set_pwc_rx(pwc_rx);
   /* Match Armino mb_ipc_heartbeat: notify CPU0 before PM ready and keep the
    * CPU1 liveness indication independent from the PWC worker. */
