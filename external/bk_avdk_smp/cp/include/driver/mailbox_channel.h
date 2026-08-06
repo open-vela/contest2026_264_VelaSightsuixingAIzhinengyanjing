@@ -153,6 +153,8 @@ typedef void  (* chnl_tx_isr_t)(void *param);
  *  then use the buf as acknowledge buffer to fill the handle result.
  */
 typedef void  (* chnl_rx_isr_t)(void *param, mb_chnl_cmd_t *cmd_buf);
+typedef bk_err_t (* chnl_rx_status_isr_t)(void *param,
+                                          mb_chnl_cmd_t *cmd_buf);
 
 typedef enum {
 	MB_CHNL_EVENT_RX_ACK_SENT = 0,
@@ -185,6 +187,7 @@ enum
 	MB_CHNL_SET_EVENT_ISR,
 	MB_CHNL_WRITE_SYNC,
 	MB_CHNL_TX_RESET,
+	MB_CHNL_SET_RX_STATUS_ISR,
 };
 
 /*
@@ -274,6 +277,8 @@ bk_err_t mb_chnl_write(u8 log_chnl, mb_chnl_cmd_t * cmd_buf);
   *     param      :  parameter of the command.
   *        MB_CHNL_GET_STATUS:   param, (u8 *) point to buffer (one byte in size.) to receive status data.
   *        MB_CHNL_SET_RX_ISR:   param, pointer to rx_isr_callback.
+  *        MB_CHNL_SET_RX_STATUS_ISR: param, pointer to an RX callback that
+  *                                   returns the command acceptance status.
   *        MB_CHNL_SET_TX_ISR:   param, pointer to tx_isr_callback.
   *        MB_CHNL_SET_TX_CMPL_ISR:   param, pointer to tx_cmpl_isr_callback.
   *        MB_CHNL_WRITE_SYNC:   param, pointer to mb_chnl_cmd_t buffer, write to mailbox synchronously.

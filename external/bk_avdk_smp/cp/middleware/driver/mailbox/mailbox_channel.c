@@ -121,6 +121,7 @@ typedef struct
 	volatile u8		tx_state;				/* logical channel tx state. */
 	u8				in_used;
 	chnl_rx_isr_t		rx_isr;
+	chnl_rx_status_isr_t	rx_status_isr;
 	chnl_tx_isr_t		tx_isr;
 	chnl_tx_cmpl_isr_t	tx_cmpl_isr;
 	chnl_event_isr_t		event_isr;
@@ -601,7 +602,20 @@ static void mb_phy_chnl_rx_cmd_isr(mb_phy_chnl_cmd_t *cmd_ptr)
 		return;
 	}
 
-	if(log_chnl_cb_x[log_chnl_idx].rx_isr != NULL)
+	if(log_chnl_cb_x[log_chnl_idx].rx_status_isr != NULL)
+	{
+		/* clear all other hdr members except hdr.cmd. */
+		cmd_ptr->hdr.logical_chnl = 0;
+		cmd_ptr->hdr.tx_seq       = 0;
+		cmd_ptr->hdr.ctrl         = 0;
+		cmd_ptr->hdr.state        = 0;
+
+		if (log_chnl_cb_x[log_chnl_idx].rx_status_isr(
+			log_chnl_cb_x[log_chnl_idx].isr_param,
+			(mb_chnl_cmd_t *)cmd_ptr) != BK_OK)
+			chnl_hdr.state |= CHNL_STATE_COM_FAIL;
+	}
+	else if(log_chnl_cb_x[log_chnl_idx].rx_isr != NULL)
 	{
 		/* clear all other hdr members except hdr.cmd. */
 		cmd_ptr->hdr.logical_chnl = 0;
@@ -948,6 +962,7 @@ bk_err_t mb_chnl_close(u8 log_chnl)
 	log_chnl_cb_x[log_chnl_idx].in_used = 0;
 	log_chnl_cb_x[log_chnl_idx].tx_state = CHNL_STATE_IDLE;
 	log_chnl_cb_x[log_chnl_idx].rx_isr = NULL;
+	log_chnl_cb_x[log_chnl_idx].rx_status_isr = NULL;
 	log_chnl_cb_x[log_chnl_idx].tx_isr = NULL;
 	log_chnl_cb_x[log_chnl_idx].tx_cmpl_isr = NULL;
 	log_chnl_cb_x[log_chnl_idx].event_isr = NULL;
@@ -1096,6 +1111,10 @@ bk_err_t mb_chnl_ctrl(u8 log_chnl, u8 cmd, void * param)
 
 		case MB_CHNL_SET_RX_ISR:
 			log_chnl_cb_x[log_chnl_idx].rx_isr = (chnl_rx_isr_t)param;
+			break;
+		case MB_CHNL_SET_RX_STATUS_ISR:
+			log_chnl_cb_x[log_chnl_idx].rx_status_isr =
+				(chnl_rx_status_isr_t)param;
 			break;
 
 		case MB_CHNL_SET_TX_ISR:
