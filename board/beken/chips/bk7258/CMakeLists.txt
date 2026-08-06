@@ -12,6 +12,7 @@ set(SRCS
     bk7258_serial.c
     bk7258_mbox0.c
     bk7258_mailbox_channel.c
+    bk7258_wifi.c
     bk7258_mb_uart.c
     bk7258_pm_pwc.c
     bk7258_psram.c
@@ -22,7 +23,18 @@ set(SRCS
     bk7258_gc2145_i2c_bitbang.c
     bk7258_yuv_buf.c
     bk7258_camera_imgdata.c
-    bk7258_aud.c)
+    bk7258_aud.c
+    bk7258_cpuindex.c
+    bk7258_idle.c)
+
+if(CONFIG_SMP)
+  list(APPEND SRCS
+       bk7258_cpustart.c
+       bk7258_cpuidlestack.c
+       bk7258_smpcall.c
+       bk7258_hwspinlock.c
+       bk7258_atomic.c)
+endif()
 
 add_library(bk7258_chip OBJECT ${SRCS})
 add_dependencies(bk7258_chip nuttx_context)

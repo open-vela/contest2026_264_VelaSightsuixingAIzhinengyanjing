@@ -19,6 +19,7 @@
 #include "hardware/bk7258_memorymap.h"
 #include "hardware/bk7258_mbox.h"
 #include "hardware/bk7258_psram.h"
+#include "bk7258_smp.h"
 
 #if defined(CONFIG_BK7258_PSRAM) && \
     CONFIG_BK7258_PSRAM_SIZE != BK7258_PSRAM_SIZE
@@ -55,9 +56,19 @@ static const struct mpu_region_s g_bk7258_mpu_regions[] =
     MPU_RLAR_NONCACHEABLE
   },
   {
+    BK7258_AP_SPINLOCK_BASE,
+    BK7258_AP_SPINLOCK_SIZE,
+    MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_INNER,
+    MPU_RLAR_NONCACHEABLE
+  },
+  {
     BK7258_CP_RAM_START,
     BK7258_CP_RAM_END - BK7258_CP_RAM_START,
-    MPU_RBAR_XN | MPU_RBAR_AP_RORO | MPU_RBAR_SH_INNER,
+    /* Controller-interface command/event pools and direct-push pbufs carry
+     * ownership words which the AP must return to the CP.
+     */
+
+    MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_INNER,
     MPU_RLAR_NONCACHEABLE
   },
   {
@@ -92,6 +103,54 @@ static const struct mpu_region_s g_bk7258_mpu_regions[] =
   },
 };
 
+void __attribute__((noinline, target("general-regs-only")))
+bk7258_cpu_private_initialize(bool primary)
+{
+  const size_t region_count = sizeof(g_bk7258_mpu_regions) /
+                              sizeof(g_bk7258_mpu_regions[0]);
+
+  modifyreg32(NVIC_CPACR, 0,
+              NVIC_CPACR_CP_FULL(10) | NVIC_CPACR_CP_FULL(11));
+  UP_DSB();
+  UP_ISB();
+
+  putreg32(0, BK7258_SAU_BASE + 0x08);
+  putreg32(0x00000000u, BK7258_SAU_BASE + 0x0c);
+  putreg32(0x0fffffe3u, BK7258_SAU_BASE + 0x10);
+  putreg32(1, BK7258_SAU_BASE + 0x08);
+  putreg32(0x10000000u, BK7258_SAU_BASE + 0x0c);
+  putreg32(0xefffffe1u, BK7258_SAU_BASE + 0x10);
+  putreg32(1, BK7258_SAU_BASE + 0x00);
+  UP_DSB();
+  UP_ISB();
+
+  putreg32((uintptr_t)__ram_vectors_start, NVIC_VECTAB);
+  UP_DSB();
+  UP_ISB();
+
+#ifdef CONFIG_ARM_MPU
+  {
+    const uint32_t hardware_regions =
+      (getreg32(MPU_TYPE) & MPU_TYPE_DREGION_MASK) >>
+      MPU_TYPE_DREGION_SHIFT;
+
+    if (hardware_regions < region_count)
+      {
+        for (; ; )
+          {
+            __asm__ volatile("wfi");
+          }
+      }
+
+    mpu_reset();
+    mpu_initialize(g_bk7258_mpu_regions, region_count, false, true);
+
+  }
+#endif
+
+  (void)primary;
+}
+
 static void __attribute__((used, noinline, noreturn,
                            target("general-regs-only")))
 bk7258_start(void)
@@ -105,20 +164,6 @@ bk7258_start(void)
 
   modifyreg32(NVIC_CPACR, 0,
               NVIC_CPACR_CP_FULL(10) | NVIC_CPACR_CP_FULL(11));
-  UP_DSB();
-  UP_ISB();
-
-  /* Match the current golden SPE SAU setup: the secure alias is retained,
-   * while the 0x10000000 non-secure alias range is exposed as non-secure.
-   */
-
-  putreg32(0, BK7258_SAU_BASE + 0x08);
-  putreg32(0x00000000u, BK7258_SAU_BASE + 0x0c);
-  putreg32(0x0fffffe3u, BK7258_SAU_BASE + 0x10);
-  putreg32(1, BK7258_SAU_BASE + 0x08);
-  putreg32(0x10000000u, BK7258_SAU_BASE + 0x0c);
-  putreg32(0xefffffe1u, BK7258_SAU_BASE + 0x10);
-  putreg32(1, BK7258_SAU_BASE + 0x00);
   UP_DSB();
   UP_ISB();
 
@@ -138,41 +183,14 @@ bk7258_start(void)
       *dest++ = *src++;
     }
 
-  putreg32((uintptr_t)__ram_vectors_start, NVIC_VECTAB);
-  UP_DSB();
-  UP_ISB();
+#ifdef CONFIG_SMP
+  bk7258_hwspinlock_initialize();
+#endif
+  bk7258_cpu_private_initialize(true);
+  arm_initialize_stack();
 
   /* Install the buffered AP log channel before normal NuttX startup. */
   (void)bk7258_syslog_initialize();
-
-#ifdef CONFIG_ARM_MPU
-  {
-    const size_t region_count = sizeof(g_bk7258_mpu_regions) /
-                                sizeof(g_bk7258_mpu_regions[0]);
-    const uint32_t hardware_regions =
-      (getreg32(MPU_TYPE) & MPU_TYPE_DREGION_MASK) >>
-      MPU_TYPE_DREGION_SHIFT;
-
-    if (hardware_regions < region_count)
-      {
-        /* A missing shared-memory region would silently widen privileged
-         * access through PRIVDEFENA.  Refuse to boot rather than claim
-         * permissions that the hardware did not install.
-         */
-
-        syslog(LOG_ERR, "BK7258 MPU has %lu regions, needs %zu\n",
-               (unsigned long)hardware_regions, region_count);
-        for (; ; )
-          {
-          }
-      }
-
-    syslog(LOG_INFO, "BK7258 MPU regions=%zu/%lu, shared RX RO TX RW\n",
-           region_count, (unsigned long)hardware_regions);
-    mpu_reset();
-    mpu_initialize(g_bk7258_mpu_regions, region_count, false, true);
-  }
-#endif
 
 #ifdef USE_EARLYSERIALINIT
   arm_earlyserialinit();
@@ -189,6 +207,9 @@ void __attribute__((naked, noreturn, section(".start_text"))) __start(void)
   __asm__ volatile
     (
       "cpsid i\n"
+      "movs r0, #0\n"
+      "ldr r1, =0x20000000\n"
+      "str r0, [r1]\n"
       "ldr r0, =__idle_stack_base\n"
       "msr msplim, r0\n"
       "b bk7258_start\n"

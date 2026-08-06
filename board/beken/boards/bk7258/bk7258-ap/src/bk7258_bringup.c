@@ -7,18 +7,16 @@
 #include <stdio.h>
 
 #include <nuttx/board.h>
+#include <nuttx/fs/fs.h>
 #include <nuttx/video/fb.h>
 
 #include <arch/board/board.h>
-
-#ifdef CONFIG_FS_PROCFS
-#  include <nuttx/fs/fs.h>
-#endif
 
 #include "bk7258_psram.h"
 #include "bk7258_ramdisk.h"
 #include "bk7258_gc9d01_fb.h"
 #include "hardware/bk7258_mbox.h"
+#include "bk7258_wifi.h"
 
 #ifdef CONFIG_BK7258_AUDIO
 #  include "bk7258_audio_bringup.h"
@@ -76,6 +74,14 @@ int bk7258_bringup(void)
     {
       return ret;
     }
+
+#ifdef CONFIG_BK7258_WIFI
+  ret = bk7258_wifi_initialize();
+  if (ret < 0)
+    {
+      return ret;
+    }
+#endif
 
   printf("button GPIOs configured, count=%lu\n",
          (unsigned long)button_count);

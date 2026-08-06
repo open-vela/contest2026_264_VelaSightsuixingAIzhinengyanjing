@@ -9,12 +9,15 @@ config ARCH_CHIP_BK7258
 	select ARCH_HAVE_CUSTOM_VECTORS
 	select ARCH_HAVE_FPU
 	select ARCH_HAVE_MPU
+	select ARCH_HAVE_MULTICPU
 	select ARM_HAVE_MPU_UNIFIED
 	select ARCH_HAVE_TRUSTZONE
+	select ARCH_IDLE_CUSTOM
+	select LIBC_ATOMIC_HWSPINLOCK if SMP
 
 config BK7258_CPU_FREQ_HZ
 	int "CPU1 fixed frequency"
-	default 120000000
+	default 480000000
 	help
 		CPU1 frequency used by the SysTick lower-half during initial
 		bring-up. Runtime DVFS is intentionally unsupported.
@@ -22,6 +25,21 @@ config BK7258_CPU_FREQ_HZ
 config BK7258_MBOX_V2
 	bool
 	default y
+
+config BK7258_WIFI
+	bool "BK7258 AP Wi-Fi IPC driver"
+	default y
+	depends on NET
+	select DRIVERS_WIRELESS
+	select DRIVERS_IEEE80211
+	select NETDEV_WIRELESS_IOCTL
+	select NETDEV_WIRELESS_HANDLER
+
+config BK7258_WIFI_TX_SLOTS
+	int "BK7258 Wi-Fi direct-push TX slots"
+	default 8
+	range 2 16
+	depends on BK7258_WIFI
 
 config BK7258_MB_UART0_TXBUFSIZE
 	int "Mailbox UART0 transport TX ring size"

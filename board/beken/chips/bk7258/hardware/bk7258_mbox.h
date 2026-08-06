@@ -16,6 +16,41 @@
 #define BK7258_MBOX_IRQ             79
 #define BK7258_MBOX_CMD_FIFO        1u
 #define BK7258_MBOX_ACK_FIFO        0u
+#define BK7258_MBOX_RAW_KICK        0x534d5001u
+
+#define BK7258_MBOX_REG(n)          (BK7258_MBOX0_BASE + ((n) * 4u))
+#define BK7258_MBOX_CTRL            BK7258_MBOX_REG(0x02)
+#define BK7258_MBOX_CH0_STATUS      BK7258_MBOX_REG(0x18)
+#define BK7258_MBOX_CH1_CFG         BK7258_MBOX_REG(0x20)
+#define BK7258_MBOX_CH1_FIFO_CFG    BK7258_MBOX_REG(0x21)
+#define BK7258_MBOX_CH1_TDATA0      BK7258_MBOX_REG(0x22)
+#define BK7258_MBOX_CH1_TDATA1      BK7258_MBOX_REG(0x23)
+#define BK7258_MBOX_CH1_TID         BK7258_MBOX_REG(0x24)
+#define BK7258_MBOX_CH1_SID         BK7258_MBOX_REG(0x25)
+#define BK7258_MBOX_CH1_RDATA0      BK7258_MBOX_REG(0x26)
+#define BK7258_MBOX_CH1_RDATA1      BK7258_MBOX_REG(0x27)
+#define BK7258_MBOX_CH1_STATUS      BK7258_MBOX_REG(0x28)
+#define BK7258_MBOX_CH2_CFG         BK7258_MBOX_REG(0x30)
+#define BK7258_MBOX_CH2_FIFO_CFG    BK7258_MBOX_REG(0x31)
+#define BK7258_MBOX_CH2_TDATA0      BK7258_MBOX_REG(0x32)
+#define BK7258_MBOX_CH2_TDATA1      BK7258_MBOX_REG(0x33)
+#define BK7258_MBOX_CH2_TID         BK7258_MBOX_REG(0x34)
+#define BK7258_MBOX_CH2_SID         BK7258_MBOX_REG(0x35)
+#define BK7258_MBOX_CH2_RDATA0      BK7258_MBOX_REG(0x36)
+#define BK7258_MBOX_CH2_RDATA1      BK7258_MBOX_REG(0x37)
+#define BK7258_MBOX_CH2_STATUS      BK7258_MBOX_REG(0x38)
+
+#define BK7258_MBOX_CFG_INT_EN         (1u << 8)
+#define BK7258_MBOX_CFG_WRERR_EN       (1u << 9)
+#define BK7258_MBOX_CFG_RDERR_EN       (1u << 10)
+#define BK7258_MBOX_CFG_WRFULL_EN      (1u << 11)
+#define BK7258_MBOX_CFG_WRERR_STATUS   (1u << 16)
+#define BK7258_MBOX_CFG_RDERR_STATUS   (1u << 17)
+#define BK7258_MBOX_CFG_WRFULL_STATUS  (1u << 18)
+#define BK7258_MBOX_CFG_ERROR_STATUS   \
+  (BK7258_MBOX_CFG_WRERR_STATUS | BK7258_MBOX_CFG_RDERR_STATUS | \
+   BK7258_MBOX_CFG_WRFULL_STATUS)
+#define BK7258_MBOX_CFG_RW_MASK        0x00000fffu
 
 #define BK7258_MB_MESSAGE_SIZE      16u
 #define BK7258_MB_HEADER_CMD_SHIFT  0u
@@ -48,8 +83,12 @@ _Static_assert((BK7258_MB_HEADER_STATE_MASK &
 
 #define BK7258_MB_CHAN_HW_CTRL_TX   0x10u
 #define BK7258_MB_CHAN_PWC_TX       0x12u
+#define BK7258_MB_CHAN_WIFI_CMD_TX  0x14u
+#define BK7258_MB_CHAN_WIFI_DATA_TX 0x15u
 #define BK7258_MB_CHAN_UART0_TX     0x19u
 #define BK7258_MB_CHAN_PWC_RX       0x42u
+#define BK7258_MB_CHAN_WIFI_CMD_RX  0x44u
+#define BK7258_MB_CHAN_WIFI_DATA_RX 0x45u
 #define BK7258_MB_CHAN_UART0_RX     0x49u
 
 #define BK7258_MB_UART_DATA         0u
@@ -192,9 +231,16 @@ typedef void (*bk7258_mb_uart_callback_t)(void *arg);
 
 int bk7258_mbox_init(void);
 int bk7258_mbox_send(uint8_t destination, const uint32_t data[2]);
+bool bk7258_mbox_smp_ready(void);
+#ifdef CONFIG_SMP
+int bk7258_mbox_secondary_init(void);
+void bk7258_smp_ipi_receive(int irq, void *context, uint32_t command);
+#endif
 uint32_t bk7258_mbox_rx_status(void);
 void bk7258_mbox_set_callback(bk7258_mbox_callback_t callback);
 void bk7258_mbox_get_stats(struct bk7258_mbox_stats *stats);
+void bk7258_mbox_kick_rx(void);
+void bk7258_mbox_discard_deferred(void);
 
 int bk7258_mailbox_init(void);
 int bk7258_mailbox_start(void);
@@ -210,7 +256,8 @@ enum bk7258_mb_link_state bk7258_mailbox_link_state(void);
 bool bk7258_mailbox_link_ready(void);
 int bk7258_mailbox_wait_link_ready(unsigned int timeout_ms);
 void bk7258_mailbox_set_link_callback(bk7258_mb_link_callback_t callback,
-                                      void *arg);
+                                       void *arg);
+uint32_t bk7258_mailbox_peer_reset_generation(void);
 
 /* Compatibility APIs used by the existing HW_CTRL and PWC services. */
 
