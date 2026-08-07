@@ -1,6 +1,9 @@
 /****************************************************************************
  * board/beken/chips/bk7258/include/bk7258_dma.h
  *
+ * Minimal single-channel (channel 0), single-shot memory-to-memory DMA
+ * driver, sized for copying YUV_BUF line batches into a frame buffer.
+ *
  * SPDX-License-Identifier: Apache-2.0
  ****************************************************************************/
 
@@ -10,18 +13,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Minimal single-channel (channel 0), single-shot (SINGLE mode) memory-to-
- * memory DMA driver.  Modeled after bk_avdk_smp release/v3.1.1
- * ap/components/bk_dvp/src/bk_dvp.c encode_yuv_dma_cpy(): both source and
- * destination are plain memory addresses (DMA_DEV_DTCM-style), not a
- * hardware FIFO peripheral bound via req_mux.  The driver is intentionally
- * re-configurable: bk7258_dma_configure()+bk7258_dma_start() may be called
- * repeatedly (e.g. once per YUV_BUF line-done interrupt) to issue a new
- * transfer once the previous one has completed.
- *
- * Not a general DMA subsystem: no channel allocation pool, no REPEAT/
- * ADDR_LOOP ring-buffer mode (only needed by JPEG/H264 continuous-encode
- * paths), no security-attribute configuration.
+/* Not a general DMA subsystem: single fixed channel, no channel
+ * allocation pool, no ring-buffer/REPEAT mode, no security-attribute
+ * configuration.  bk7258_dma_configure()+bk7258_dma_start() may be
+ * called repeatedly (e.g. once per YUV_BUF line-batch-done interrupt)
+ * to issue a new transfer once the previous one has completed.
  */
 
 typedef void (*bk7258_dma_done_cb_t)(void *arg);
