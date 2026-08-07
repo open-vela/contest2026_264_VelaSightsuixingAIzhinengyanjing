@@ -42,10 +42,20 @@
 #include <nuttx/video/imgsensor.h>
 #include <sys/videoio.h>
 
+#include "arm_internal.h"
 #include "bk7258_gpio.h"
-#include "bk7258_i2c1.h"
+#include "bk7258_gc2145_i2c_bitbang.h"
+#include "hardware/bk7258_gpio.h"
+#include <nuttx/clock.h>
 
 #define GC2145_I2C_ADDR      0x3Cu
+
+/* DVP_MCLK_PIN's pinmux function index -- see this file's
+ * bk7258_gc2145_mclk_enable() comment for the full evidence chain on
+ * why this is 1 (GPIO_DEV_CLK_AUXS_CIS), not 0
+ * (GPIO_DEV_JPEG_MCLK/DVP_PINMUX_FUNCTION as used for the other DVP
+ * pins below). */
+#define DVP_MCLK_PINMUX_FUNCTION  1u
 
 #define DVP_MCLK_PIN         27u
 #define DVP_PCLK_PIN         29u
@@ -56,6 +66,65 @@
 
 #define DVP_RESET_PIN        28u
 #define DVP_POWER_PIN        49u
+
+/* System clock controller (SOC_SYS_REG_BASE) register offsets/fields
+ * for the AUXS_CIS clock path that actually drives the GC2145's MCLK
+ * input pin (GPIO27) -- ported from bk_avdk_smp's authoritative
+ * register layout (ap/middleware/soc/bk7258_ap/soc/sys_struct.h,
+ * ap/middleware/soc/bk7258_ap/hal/sys_ll.h) and its
+ * dvp_camera_mclk_enable() (ap/components/bk_dvp/src/dvp_common.c)
+ * reference sequence.
+ *
+ * ROOT CAUSE (see this file's header comment for the full account of
+ * how this was found): this repo's DVP pinmux setup only ever selected
+ * GPIO27's function index 0 (GPIO_DEV_JPEG_MCLK) and never touched any
+ * system-clock register, so GPIO27 was never actually driven with a
+ * real MCLK waveform -- it was left as whatever default/floating state
+ * that pinmux selection produces, with no oscillating clock output.
+ * GC2145's datasheet (GC2145 CSP Datasheet release V1.0, section 7.2.1
+ * "Power On Sequence") lists "t3: From AVDD to MCLK applied" and
+ * "t4: From MCLK applied to Sensor enable" as mandatory power-up
+ * stages before the sensor's internal logic (including its SCCB/I2C
+ * slave interface) becomes responsive -- without a real MCLK input,
+ * the sensor's I2C bus never comes alive, which fully explains why
+ * every I2C write NACKed on the very first (address) byte regardless
+ * of how correct this driver's bit-bang timing/protocol/pin-assignment
+ * turned out to be under exhaustive cross-checking. The reference
+ * implementation's dvp_camera_mclk_enable() (called unconditionally by
+ * bk_dvp_detect() before any I2C traffic) is the only place in
+ * bk_avdk_smp that actually starts this clock, via:
+ *   1. gpio_dev_map(GPIO_27, GPIO_DEV_CLK_AUXS_CIS) -- pinmux function
+ *      index 1 in GPIO27's per-pin function array
+ *      (bk_avdk_smp/ap/middleware/soc/bk7258_ap/soc/gpio_map.h's
+ *      {GPIO_DEV_JPEG_MCLK, GPIO_DEV_CLK_AUXS_CIS, ...} list), NOT
+ *      index 0 as this driver's other DVP pins correctly use.
+ *   2. sys_drv_set_auxs_cis(cksel, ckdiv) -- selects clock source and
+ *      divider (default MCLK_24M case: cksel=3, ckdiv=19).
+ *   3. sys_drv_set_cis_auxs_clk_en(1) -- the actual clock-gate enable
+ *      bit, without which steps 1-2 configure the divider but never
+ *      let the clock signal reach the pin.
+ */
+#define BK7258_SYS_REG_BASE            0x44010000u
+
+/* reg0x0a (SOC_SYS_REG_BASE + 0xa*4): cksel_auxs_cis at bit[15:16],
+ * ckdiv_auxs_cis at bit[17:21]. */
+#define BK7258_SYS_REG_0X0A            (BK7258_SYS_REG_BASE + (0xau << 2))
+#define BK7258_SYS_CKSEL_AUXS_CIS_SHIFT 15u
+#define BK7258_SYS_CKSEL_AUXS_CIS_MASK  (0x3u << BK7258_SYS_CKSEL_AUXS_CIS_SHIFT)
+#define BK7258_SYS_CKDIV_AUXS_CIS_SHIFT 17u
+#define BK7258_SYS_CKDIV_AUXS_CIS_MASK  (0x1fu << BK7258_SYS_CKDIV_AUXS_CIS_SHIFT)
+
+/* reg0x0d (SOC_SYS_REG_BASE + 0xd*4): cis_auxs_cken at bit[9]. */
+#define BK7258_SYS_REG_0X0D            (BK7258_SYS_REG_BASE + (0xdu << 2))
+#define BK7258_SYS_CIS_AUXS_CKEN       (1u << 9)
+
+/* MCLK_24M case from dvp_camera_mclk_enable(): cksel=3, ckdiv=19.
+ * Matches this repo's other DVP timing choices (no runtime MCLK
+ * frequency selection is implemented; GC2145's init register table
+ * was ported assuming this same 24MHz convention the reference SDK
+ * itself defaults to). */
+#define GC2145_MCLK_CKSEL              3u
+#define GC2145_MCLK_CKDIV              19u
 
 #define GC2145_CAPTURE_WIDTH   640u
 #define GC2145_CAPTURE_HEIGHT  480u
@@ -801,27 +870,84 @@ static struct bk7258_gc2145_dev_s g_bk7258_gc2145 =
 
 static void bk7258_gc2145_power_on(void)
 {
+  uint32_t before;
+  uint32_t after;
+  clock_t t0;
+  clock_t t1;
+
+  before = getreg32(BK7258_GPIO_CFG(DVP_POWER_PIN));
   bk7258_gpio_output(DVP_POWER_PIN, true);
+  after = getreg32(BK7258_GPIO_CFG(DVP_POWER_PIN));
+  printf("bk7258_camera_imgsensor: power_on GPIO%u GPIO_CFG before=0x%08x "
+         "after=0x%08x (OUTPUT bit %s)\n",
+         DVP_POWER_PIN, (unsigned int)before, (unsigned int)after,
+         (after & BK7258_GPIO_OUTPUT) ? "SET" : "CLEAR");
 
   /* 120ms LDO settle delay, matching bk7258_gc2145.c's convention (see
    * that file's bk7258_gc2145_power_on() comment for the cross-checked
-   * rationale, not repeated here). */
+   * rationale, not repeated here).  Measured against clock_systime_ticks()
+   * (SysTick-backed, CONFIG_USEC_PER_TICK=1000 -> 1 tick = 1ms,
+   * independent of the up_udelay() busy-loop calibration this call
+   * itself depends on) so the *actual* elapsed wall time of this delay
+   * is directly visible in the log, rather than trusting the
+   * CONFIG_BOARD_LOOPSPERMSEC estimate. */
+  t0 = clock_systime_ticks();
   up_udelay(120000);
+  t1 = clock_systime_ticks();
+  printf("bk7258_camera_imgsensor: power_on 120ms delay done, measured "
+         "%lu ticks (~%lu ms, 1 tick=%dus)\n",
+         (unsigned long)(t1 - t0), (unsigned long)(t1 - t0),
+         (int)(USEC_PER_TICK));
 }
 
 static void bk7258_gc2145_reset(void)
 {
+  uint32_t after_low;
+  uint32_t after_high;
+  clock_t t0;
+  clock_t t1;
+
   bk7258_gpio_output(DVP_RESET_PIN, false);
+  after_low = getreg32(BK7258_GPIO_CFG(DVP_RESET_PIN));
+  printf("bk7258_camera_imgsensor: reset GPIO%u driven LOW, GPIO_CFG="
+         "0x%08x (OUTPUT bit %s)\n",
+         DVP_RESET_PIN, (unsigned int)after_low,
+         (after_low & BK7258_GPIO_OUTPUT) ? "SET(!)" : "CLEAR(ok)");
+  t0 = clock_systime_ticks();
   up_udelay(120000);
+  t1 = clock_systime_ticks();
+  printf("bk7258_camera_imgsensor: reset LOW-phase delay measured %lu "
+         "ticks (~%lu ms)\n", (unsigned long)(t1 - t0),
+         (unsigned long)(t1 - t0));
+
   bk7258_gpio_output(DVP_RESET_PIN, true);
+  after_high = getreg32(BK7258_GPIO_CFG(DVP_RESET_PIN));
+  printf("bk7258_camera_imgsensor: reset GPIO%u driven HIGH, GPIO_CFG="
+         "0x%08x (OUTPUT bit %s)\n",
+         DVP_RESET_PIN, (unsigned int)after_high,
+         (after_high & BK7258_GPIO_OUTPUT) ? "SET(ok)" : "CLEAR(!)");
+  t0 = clock_systime_ticks();
   up_udelay(120000);
+  t1 = clock_systime_ticks();
+  printf("bk7258_camera_imgsensor: reset HIGH-phase delay measured %lu "
+         "ticks (~%lu ms)\n", (unsigned long)(t1 - t0),
+         (unsigned long)(t1 - t0));
+  printf("bk7258_camera_imgsensor: reset sequence complete\n");
 }
 
 static void bk7258_gc2145_dvp_pinmux(void)
 {
   uint32_t i;
 
-  bk7258_gpio_set_function(DVP_MCLK_PIN, DVP_PINMUX_FUNCTION);
+  /* GPIO27 (MCLK) uses a different pinmux function index than the
+   * other DVP pins -- see this file's BK7258_SYS_REG_0X0A/0X0D comment
+   * block for the full evidence chain.  DVP_PINMUX_FUNCTION (index 0,
+   * GPIO_DEV_JPEG_MCLK) would NOT actually drive an oscillating clock
+   * signal onto this pin; DVP_MCLK_PINMUX_FUNCTION (index 1,
+   * GPIO_DEV_CLK_AUXS_CIS) is required, together with
+   * bk7258_gc2145_mclk_enable() actually enabling that clock path's
+   * gate. */
+  bk7258_gpio_set_function(DVP_MCLK_PIN, DVP_MCLK_PINMUX_FUNCTION);
   bk7258_gpio_set_function(DVP_PCLK_PIN, DVP_PINMUX_FUNCTION);
   bk7258_gpio_set_function(DVP_HSYNC_PIN, DVP_PINMUX_FUNCTION);
   bk7258_gpio_set_function(DVP_VSYNC_PIN, DVP_PINMUX_FUNCTION);
@@ -830,6 +956,39 @@ static void bk7258_gc2145_dvp_pinmux(void)
     {
       bk7258_gpio_set_function(DVP_DATA_PIN(i), DVP_PINMUX_FUNCTION);
     }
+}
+
+/* Enables the AUXS_CIS system clock path that supplies GC2145's MCLK
+ * input (GPIO27), matching bk_avdk_smp's dvp_camera_mclk_enable()
+ * MCLK_24M case exactly (cksel=3, ckdiv=19) -- see this file's
+ * BK7258_SYS_REG_0X0A/0X0D comment block for the full rationale.  Must
+ * be called after bk7258_gc2145_dvp_pinmux() has already selected
+ * GPIO27's GPIO_DEV_CLK_AUXS_CIS function (pinmux alone does not start
+ * the clock; this register sequence is the actual clock-source-select
+ * + divider + gate-enable that makes the signal appear on the pin),
+ * and before any I2C traffic (GC2145's datasheet power-up sequence
+ * requires MCLK to be applied before the sensor's internal logic,
+ * including its I2C/SCCB slave interface, becomes responsive). */
+static void bk7258_gc2145_mclk_enable(void)
+{
+  uint32_t reg;
+
+  reg = getreg32(BK7258_SYS_REG_0X0A);
+  reg &= ~(BK7258_SYS_CKSEL_AUXS_CIS_MASK | BK7258_SYS_CKDIV_AUXS_CIS_MASK);
+  reg |= (GC2145_MCLK_CKSEL << BK7258_SYS_CKSEL_AUXS_CIS_SHIFT) &
+         BK7258_SYS_CKSEL_AUXS_CIS_MASK;
+  reg |= (GC2145_MCLK_CKDIV << BK7258_SYS_CKDIV_AUXS_CIS_SHIFT) &
+         BK7258_SYS_CKDIV_AUXS_CIS_MASK;
+  putreg32(reg, BK7258_SYS_REG_0X0A);
+
+  reg = getreg32(BK7258_SYS_REG_0X0D);
+  reg |= BK7258_SYS_CIS_AUXS_CKEN;
+  putreg32(reg, BK7258_SYS_REG_0X0D);
+
+  printf("bk7258_camera_imgsensor: MCLK (GPIO%u) AUXS_CIS clock enabled, "
+         "reg0x0a=0x%08x reg0x0d=0x%08x\n",
+         DVP_MCLK_PIN, (unsigned int)getreg32(BK7258_SYS_REG_0X0A),
+         (unsigned int)getreg32(BK7258_SYS_REG_0X0D));
 }
 
 static bool bk7258_gc2145_write_reg_table(const struct gc2145_reg *table,
@@ -871,7 +1030,31 @@ static int bk7258_gc2145_init(FAR struct imgsensor_s *sensor)
   bk7258_gc2145_power_on();
   bk7258_gc2145_reset();
   bk7258_gc2145_dvp_pinmux();
+  bk7258_gc2145_mclk_enable();
+
+  printf("bk7258_camera_imgsensor: pre-i2c-init snapshot: GPIO%u(power) "
+         "CFG=0x%08x GPIO%u(reset) CFG=0x%08x GPIO42(scl) CFG=0x%08x "
+         "GPIO43(sda) CFG=0x%08x\n",
+         DVP_POWER_PIN, (unsigned int)getreg32(BK7258_GPIO_CFG(DVP_POWER_PIN)),
+         DVP_RESET_PIN, (unsigned int)getreg32(BK7258_GPIO_CFG(DVP_RESET_PIN)),
+         (unsigned int)getreg32(BK7258_GPIO_CFG(42u)),
+         (unsigned int)getreg32(BK7258_GPIO_CFG(43u)));
+
   bk7258_i2c1_init();
+
+  printf("bk7258_camera_imgsensor: post-i2c-init snapshot: GPIO42(scl) "
+         "CFG=0x%08x GPIO43(sda) CFG=0x%08x\n",
+         (unsigned int)getreg32(BK7258_GPIO_CFG(42u)),
+         (unsigned int)getreg32(BK7258_GPIO_CFG(43u)));
+
+  if (!bk7258_i2c1_sda_idle_diag())
+    {
+      printf("bk7258_camera_imgsensor: WARNING: idle-bus SDA read-back "
+             "was NOT reliably high (no clock/slave activity involved) "
+             "-- ACK sampling is unreliable, any NACK below cannot be "
+             "trusted as sensor behavior; suspect missing/broken "
+             "pull-up on GPIO43 or the pin stuck low\n");
+    }
 
   printf("bk7258_camera_imgsensor: writing %u init registers\n",
          (unsigned int)GC2145_INIT_REG_COUNT);

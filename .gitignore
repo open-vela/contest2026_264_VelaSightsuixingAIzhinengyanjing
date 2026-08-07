@@ -27,3 +27,7 @@ music.flac
 
 # Vendor confidential documents (not for open-source distribution)
 *Datasheet*.pdf
+board/beken/chips/bk7258/sim_tests
+
+# Local scratch notes, not for submission
+docs/

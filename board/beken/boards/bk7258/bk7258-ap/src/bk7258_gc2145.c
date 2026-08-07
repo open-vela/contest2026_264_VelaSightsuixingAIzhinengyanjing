@@ -34,14 +34,14 @@
 #include <string.h>
 
 #include "bk7258_gpio.h"
-#include "bk7258_i2c1.h"
+#include "bk7258_gc2145_i2c_bitbang.h"
 #include "bk7258_yuv_buf.h"
 #include "bk7258_dma.h"
 
 /* GC2145 is at 7-bit I2C address 0x3C (datasheet's 0x78 write / 0x79 read
  * are the pre-shifted 8-bit forms; bk7258_i2c1_write_reg() takes the
  * 7-bit form and performs the <<1 shift internally -- see
- * bk7258_i2c1.h). */
+ * bk7258_gc2145_i2c_bitbang.h). */
 #define GC2145_I2C_ADDR      0x3Cu
 
 /* DVP data/sync pins, per design doc section 2 (gpio_map.h

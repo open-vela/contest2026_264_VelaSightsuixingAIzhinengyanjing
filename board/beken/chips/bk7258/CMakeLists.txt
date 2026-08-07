@@ -19,7 +19,7 @@ set(SRCS
     bk7258_qspi.c
     bk7258_dma.c
     bk7258_i2c_sim.c
-    bk7258_i2c1.c
+    bk7258_gc2145_i2c_bitbang.c
     bk7258_yuv_buf.c
     bk7258_camera_imgdata.c)
 

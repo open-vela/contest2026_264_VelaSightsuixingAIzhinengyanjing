@@ -47,4 +47,14 @@ void bk7258_yuv_buf_set_line_callback(bk7258_yuv_buf_line_cb_t cb, void *arg);
 void bk7258_yuv_buf_start(void);
 void bk7258_yuv_buf_stop(void);
 
+/* Diagnostic: prints YUV_BUF's live ctrl/int_en/int_status register
+ * values and the ISR fire count so far (see bk7258_yuv_buf.c's
+ * g_isr_fire_count), without depending on an interrupt actually having
+ * fired.  Use this to distinguish "the DVP data lines never produced a
+ * valid signal so YUV_BUF's line-done interrupt never fires at all"
+ * from "the interrupt fires but bk7258_camera_imgdata.c's callback/DMA
+ * chain has a bug" when nxcamera's stream command hangs after
+ * start_capture with no frame ever completing. */
+void bk7258_yuv_buf_dump_status(void);
+
 #endif /* __VENDOR_BEKEN_CHIPS_BK7258_INCLUDE_BK7258_YUV_BUF_H */
