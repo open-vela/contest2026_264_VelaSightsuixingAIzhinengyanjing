@@ -80,7 +80,9 @@
 #include <nuttx/config.h>
 #include <nuttx/arch.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "arm_internal.h"
 #include "hardware/bk7258_memorymap.h"
@@ -117,11 +119,54 @@
 
 #define QSPI_CMD_START_BIT         (1u << 0)
 
+/* config, REG_0x18 (qspi_struct.h) */
+
+#define QSPI_CONFIG                     QSPI_REG(0x60u)
+#define QSPI_CONFIG_QSPI_EN             (1u << 0)
+#define QSPI_CONFIG_FORCE_SPI_CS_LOW    (1u << 6)
+#define QSPI_CONFIG_CLK_RATE_SHIFT      8u
+#define QSPI_CONFIG_CLK_RATE_MASK       (0xffu << QSPI_CONFIG_CLK_RATE_SHIFT)
+#define QSPI_CONFIG_DISABLE_CMD_SCK     (1u << 16)
+#define QSPI_CONFIG_IO_CPU_MEM_SEL      (1u << 22)
+
+/* Memory-mapped data window of the QSPI1 controller
+ * (LCD_QSPI1_DATA_ADDR, ap/include/driver/lcd_qspi_types.h).  With
+ * config.io_cpu_mem_sel set, every write into this window is streamed out
+ * of the QSPI data lines, which is how a whole frame is pushed to the
+ * panel without touching the command FIFO for each byte.
+ */
+
+#define QSPI1_DATA_WINDOW               0x68000000u
+
+/* GC9-series QSPI command framing: a transfer always starts with a 4-byte
+ * header {write_cmd, 0x00, register, 0x00} placed in cmd_c_h's
+ * cmd1..cmd4 (bk_lcd_qspi_send_cmd(), lcd_qspi_driver.c), where write_cmd
+ * is 0x02 for a register write and 0x32 for a quad pixel write
+ * (gc9c01_cmd[] = {0x32, 0x00, 0x2c, 0x00}).  cmd_c_cfg1 marks where the
+ * header ends by writing the wire-mode value 3 into the cmdN_line field
+ * of the first byte position that is NOT part of the header.
+ */
+
+#define GC9_REG_WRITE_CMD               0x02u
+#define GC9_PIXEL_WRITE_CMD             0x02u
+#define GC9_RAMWR                       0x2Cu
+#define QSPI_CMD_LINE_MARK              0x3u
+
+/* Panel clock.  GC9D01's reference config asks for 60MHz
+ * (lcd_spi_gc9d01_config.clk = LCD_QSPI_60M); clk_rate is a divider of the
+ * 480MHz QSPI source clock, so 8 gives 60MHz.
+ */
+
+#define QSPI_CLK_RATE_60M               8u
+
 /* Matches qspi_ll_wait_cmd_done()'s 10000-iteration bound
  * (ap/middleware/soc/bk7258_ap/hal/qspi_ll.h) instead of looping forever,
  * so a pinmux or wiring problem produces a diagnosable timeout rather than
  * an unrecoverable hang. */
 #define QSPI_WAIT_DONE_MAX_ITER    10000
+
+static bool g_qspi_cmd_traced;
+static uint32_t g_qspi_frames;
 
 static bool bk7258_qspi0_wait_done(void)
 {
@@ -172,32 +217,167 @@ void bk7258_qspi0_init(void)
   putreg32(QSPI_GLB_CTRL_SOFT_RESET, QSPI_GLB_CTRL);
   up_udelay(10);
   putreg32(0, QSPI_GLB_CTRL);
+
+  /* Clock rate and controller enable.  These were never programmed before:
+   * the controller ran at whatever clk_rate reset left behind, and
+   * qspi_en was never set, which is one reason the panel never showed
+   * anything even though every command "completed".
+   */
+
+  modifyreg32(QSPI_CONFIG, QSPI_CONFIG_CLK_RATE_MASK,
+              (QSPI_CLK_RATE_60M << QSPI_CONFIG_CLK_RATE_SHIFT) |
+              QSPI_CONFIG_QSPI_EN);
+
+  printf("bk7258_qspi1: init: devclk_en=0x%08x config=0x%08x "
+         "glb_ctrl=0x%08x (clk_rate=%u qspi_en=%u)\n",
+         (unsigned int)getreg32(BK7258_SYS_DEVCLK_EN),
+         (unsigned int)getreg32(QSPI_CONFIG),
+         (unsigned int)getreg32(QSPI_GLB_CTRL),
+         (unsigned int)((getreg32(QSPI_CONFIG) &
+                         QSPI_CONFIG_CLK_RATE_MASK) >>
+                        QSPI_CONFIG_CLK_RATE_SHIFT),
+         (unsigned int)((getreg32(QSPI_CONFIG) &
+                         QSPI_CONFIG_QSPI_EN) != 0));
 }
 
 bool bk7258_qspi0_send_cmd(uint8_t cmd, const uint8_t *data, uint8_t data_len)
 {
-  uint32_t cmd_c_h = (uint32_t)cmd;
   uint32_t cmd_c_l = 0;
   uint8_t i;
+
+  /* CORRECTION (2026-08-10): this used to put the bare register number in
+   * cmd_c_h and leave cmd_c_cfg1/cfg2 at zero.  That is not the framing
+   * GC9-series panels expect -- bk_lcd_qspi_send_cmd() builds a 4-byte
+   * header {0x02, 0x00, reg, 0x00} and then marks the end of the header in
+   * cmd_c_cfg1.  With the old code every command "completed" (the
+   * controller happily clocked out a malformed frame and asserted
+   * cmd_start_done), which is why bk7258_gc9d01_test() reported success
+   * while the panel stayed dark: the transfers were well-formed QSPI
+   * bursts carrying the wrong bytes.
+   */
 
   putreg32(0, QSPI_CMD_C_L);
   putreg32(0, QSPI_CMD_C_H);
   putreg32(0, QSPI_CMD_C_CFG1);
   putreg32(0, QSPI_CMD_C_CFG2);
 
-  if (data_len > 0 && data_len <= 4)
+  if (data_len > 4)
     {
-      for (i = 0; i < data_len; i++)
-        {
-          cmd_c_l |= ((uint32_t)data[i]) << (i * 8);
-        }
-
-      putreg32(cmd_c_l, QSPI_CMD_C_L);
+      return false;    /* long payloads would need the FIFO path */
     }
 
-  putreg32(cmd_c_h, QSPI_CMD_C_H);
+  for (i = 0; i < data_len; i++)
+    {
+      cmd_c_l |= ((uint32_t)data[i]) << (i * 8);
+    }
+
+  putreg32(cmd_c_l, QSPI_CMD_C_L);
+  putreg32((((uint32_t)cmd) << 16) | GC9_REG_WRITE_CMD, QSPI_CMD_C_H);
+
+  /* Header is 4 bytes (write_cmd, 0x00, reg, 0x00) plus data_len payload
+   * bytes; mark the first byte slot after them, exactly as
+   * "0x3 << ((data_len + 4) * 2)" does in the reference.
+   */
+
+  putreg32(QSPI_CMD_LINE_MARK << ((data_len + 4u) * 2u), QSPI_CMD_C_CFG1);
+
+  if (!g_qspi_cmd_traced)
+    {
+      /* One-shot trace of the very first command: the whole GC9 framing fix
+       * lives in these four registers, so their real read-back values are
+       * the evidence that the header is being built as intended.
+       */
+
+      g_qspi_cmd_traced = true;
+      printf("bk7258_qspi1: first cmd 0x%02x: cmd_c_h=0x%08x "
+             "cmd_c_l=0x%08x cfg1=0x%08x cfg2=0x%08x data_len=%u\n",
+             cmd, (unsigned int)getreg32(QSPI_CMD_C_H),
+             (unsigned int)getreg32(QSPI_CMD_C_L),
+             (unsigned int)getreg32(QSPI_CMD_C_CFG1),
+             (unsigned int)getreg32(QSPI_CMD_C_CFG2),
+             (unsigned int)data_len);
+    }
+
   modifyreg32(QSPI_CMD_C_CFG2, 0, QSPI_CMD_START_BIT);
-  return bk7258_qspi0_wait_done();
+
+  if (!bk7258_qspi0_wait_done())
+    {
+      printf("bk7258_qspi1: cmd 0x%02x TIMED OUT, status=0x%08x "
+             "cfg2=0x%08x\n", cmd,
+             (unsigned int)getreg32(QSPI_STATUS),
+             (unsigned int)getreg32(QSPI_CMD_C_CFG2));
+      return false;
+    }
+
+  return true;
+}
+
+bool bk7258_qspi1_lcd_write_frame(FAR const void *frame, size_t len)
+{
+  FAR const uint32_t *src = frame;
+  FAR volatile uint32_t *win = (FAR volatile uint32_t *)QSPI1_DATA_WINDOW;
+  size_t words = len / 4u;
+  size_t i;
+
+  if (frame == NULL || len == 0 || (len & 3u) != 0)
+    {
+      return false;
+    }
+
+  /* Open a pixel-write burst: hold CS low across the whole frame, send the
+   * {0x02, 0x00, RAMWR, 0x00} header through the command channel, then hand
+   * the data lines over to the memory-mapped window
+   * (bk_lcd_qspi_quad_write_start(), lcd_qspi_driver.c).
+   */
+
+  modifyreg32(QSPI_CONFIG, 0, QSPI_CONFIG_FORCE_SPI_CS_LOW);
+
+  putreg32(0, QSPI_CMD_C_L);
+  putreg32((((uint32_t)GC9_RAMWR) << 16) | GC9_PIXEL_WRITE_CMD,
+           QSPI_CMD_C_H);
+  putreg32(QSPI_CMD_LINE_MARK << (4u * 2u), QSPI_CMD_C_CFG1);
+  putreg32(0, QSPI_CMD_C_CFG2);
+  modifyreg32(QSPI_CMD_C_CFG2, 0, QSPI_CMD_START_BIT);
+
+  if (!bk7258_qspi0_wait_done())
+    {
+      modifyreg32(QSPI_CONFIG, QSPI_CONFIG_FORCE_SPI_CS_LOW, 0);
+      return false;
+    }
+
+  modifyreg32(QSPI_CONFIG, 0,
+              QSPI_CONFIG_IO_CPU_MEM_SEL | QSPI_CONFIG_DISABLE_CMD_SCK);
+
+  if (g_qspi_frames < 2)
+    {
+      printf("bk7258_qspi1: frame %u: config=0x%08x words=%u src=%p "
+             "first_px=0x%04x\n", (unsigned int)g_qspi_frames,
+             (unsigned int)getreg32(QSPI_CONFIG), (unsigned int)words,
+             frame, (unsigned int)(src[0] & 0xffff));
+    }
+
+  /* CPU-driven copy.  160x160 RGB565 is 51200 bytes, which at 60MHz is
+   * about 7ms even single-wire, so DMA is not needed to reach the frame
+   * rates this panel is used at; it can be added later without changing
+   * this function's contract.
+   */
+
+  for (i = 0; i < words; i++)
+    {
+      *win = src[i];
+    }
+
+  modifyreg32(QSPI_CONFIG,
+              QSPI_CONFIG_IO_CPU_MEM_SEL | QSPI_CONFIG_DISABLE_CMD_SCK |
+              QSPI_CONFIG_FORCE_SPI_CS_LOW, 0);
+
+  g_qspi_frames++;
+  return true;
+}
+
+uint32_t bk7258_qspi1_lcd_frame_count(void)
+{
+  return g_qspi_frames;
 }
 
 uint32_t bk7258_qspi0_read_id(void)

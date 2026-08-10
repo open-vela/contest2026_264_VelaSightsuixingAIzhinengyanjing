@@ -14,6 +14,10 @@ if(CONFIG_BK7258_AUDIO)
   list(APPEND SRCS bk7258_audio_bringup.c bk7258_audio_dev.c)
 endif()
 
+if(CONFIG_BK7258_GC9D01_FB)
+  list(APPEND SRCS bk7258_gc9d01_fb.c)
+endif()
+
 target_sources(board PRIVATE ${SRCS})
 target_include_directories(board PRIVATE
   ${NUTTX_BOARD_ABS_DIR}/include

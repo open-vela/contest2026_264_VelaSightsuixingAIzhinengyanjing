@@ -57,9 +57,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <errno.h>
 
 #include "bk7258_gpio.h"
 #include "bk7258_qspi.h"
+#include "bk7258_gc9d01_fb.h"
 
 /* GC9D01 reset pin, corrected against the actual board schematic
  * (AIDK_AI玩具开发板_原理图.pdf) after this driver's original QSPI0/GPIO6
@@ -174,7 +176,7 @@ static void bk7258_gc9d01_hw_reset(void)
  *
  ****************************************************************************/
 
-int bk7258_gc9d01_test(int argc, char **argv)
+int bk7258_gc9d01_panel_init(void)
 {
   size_t i;
 
@@ -208,11 +210,32 @@ int bk7258_gc9d01_test(int argc, char **argv)
                               g_gc9d01_display_on.data,
                               g_gc9d01_display_on.data_len))
     {
-      printf("gc9d01: qspi0 timed out waiting for display-on cmd to "
+      printf("gc9d01: qspi timed out waiting for display-on cmd to "
              "complete\n");
-      return -1;
+      return -EIO;
     }
 
-  printf("gc9d01: init sequence completed without hang\n");
-  return 0;
+  printf("gc9d01: init sequence sent\n");
+  return OK;
+}
+
+/****************************************************************************
+ * Name: bk7258_gc9d01_test
+ *
+ * Description:
+ *   Legacy standalone entry point, kept as a thin wrapper so the panel can
+ *   be brought up without the framebuffer layer.  Note the caveat that has
+ *   always applied to it: "the sequence was sent without hanging" is not
+ *   evidence that the panel accepted it.  The panel has no readable ID
+ *   register, so the only real proof is pixels on the glass -- use
+ *   bk7258_gc9d01_fb_test_pattern() for that.
+ *
+ ****************************************************************************/
+
+int bk7258_gc9d01_test(int argc, char **argv)
+{
+  UNUSED(argc);
+  UNUSED(argv);
+
+  return bk7258_gc9d01_panel_init();
 }

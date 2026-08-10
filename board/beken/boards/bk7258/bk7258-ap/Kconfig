@@ -15,6 +15,19 @@ config BK7258_MB_UART0_CONSOLE
 	select SERIAL_IFLOWCONTROL
 	select SERIAL_IFLOWCONTROL_WATERMARKS
 
+config BK7258_GC9D01_FB
+	bool "GC9D01 panel framebuffer (/dev/fb0)"
+	default n
+	depends on VIDEO_FB
+	select FB_UPDATE
+	help
+		Register the 160x160 RGB565 GC9D01 round panel as /dev/fb0, driven
+		over QSPI1.  FB_UPDATE is required, not optional: the panel has its
+		own GRAM and is written over a serial bus, so nothing reaches the
+		glass until updatearea() pushes the framebuffer.  FB_UPDATE has no
+		prompt of its own in drivers/video/Kconfig and can only be enabled
+		by a select, which is why this option exists.
+
 config BK7258_POWER_KEY_MOTOR
 	bool "Vibrate while the power key is pressed"
 	default n

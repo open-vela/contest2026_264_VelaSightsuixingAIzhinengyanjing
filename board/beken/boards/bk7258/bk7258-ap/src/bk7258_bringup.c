@@ -7,6 +7,7 @@
 #include <stdio.h>
 
 #include <nuttx/board.h>
+#include <nuttx/video/fb.h>
 
 #include <arch/board/board.h>
 
@@ -16,6 +17,7 @@
 
 #include "bk7258_psram.h"
 #include "bk7258_ramdisk.h"
+#include "bk7258_gc9d01_fb.h"
 #include "hardware/bk7258_mbox.h"
 
 #ifdef CONFIG_BK7258_AUDIO
@@ -125,9 +127,30 @@ void board_late_initialize(void)
    * the unconditionally-called CONFIG_BOARD_LATE_INITIALIZE hook.  See
    * docs/superpowers/plans/2026-07-29-gc9d01-lcd-bringup.md Task 3 Step 3.
    */
-  /* Disabled while isolating the QSPI command-completion wait from the
-   * power-key motor polling worker. */
-  /* (void)bk7258_gc9d01_test(0, NULL); */
+#ifdef CONFIG_BK7258_GC9D01_FB
+  /* GC9D01 framebuffer: fb_register() calls up_fbinitialize(), which does
+   * the panel reset / QSPI bring-up / init sequence and allocates the
+   * 51200-byte RGB565 framebuffer, then publishes /dev/fb0.
+   */
+
+  ret = fb_register(0, 0);
+  if (ret < 0)
+    {
+      printf("fb_register() failed: %d\n", ret);
+    }
+  else
+    {
+      /* The panel has no readable ID register, so "the init sequence was
+       * sent" has never been evidence that it worked.  Draw a pattern once
+       * at boot: four quadrants with a black border makes both a byte-order
+       * mistake (wrong colours) and a stride mistake (sheared boundaries)
+       * visible at a glance.
+       */
+
+      (void)bk7258_gc9d01_fb_test_pattern();
+      printf("fb: /dev/fb0 registered, boot test pattern pushed\n");
+    }
+#endif
 
   /* GC2145 camera: registered as a standard V4L2 /dev/video0 node here
    * (imgdata+imgsensor framework, see bk7258_camera_bringup.c), superseding

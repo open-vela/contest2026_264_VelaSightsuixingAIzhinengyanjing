@@ -11,6 +11,7 @@
   <project path="contest2026_264_VelaSightsuixingAIzhinengyanjing" name="contest2026_264_VelaSightsuixingAIzhinengyanjing">
     <linkfile src="app/hello_app" dest="packages/demos/contest2026_264_hello_app"/>
     <linkfile src="app/audio_test" dest="packages/demos/contest2026_264_audio_test"/>
+    <linkfile src="app/camera_preview" dest="packages/demos/contest2026_264_camera_preview"/>
     <linkfile src="quickapp/hello_quickapp" dest="packages/apps/contest2026_264_hello_quickapp"/>
     <linkfile src="board/contest_board" dest="vendor/openvela/boards/contest2026_264_board"/>
     <linkfile src="board/beken/chips/bk7258"
