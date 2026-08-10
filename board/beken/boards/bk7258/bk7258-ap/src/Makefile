@@ -15,4 +15,9 @@ CSRCS += bk7258_gc9d01.c
 CSRCS += bk7258_camera_imgsensor.c
 CSRCS += bk7258_camera_bringup.c
 
+ifeq ($(CONFIG_BK7258_AUDIO),y)
+CSRCS += bk7258_audio_bringup.c
+CSRCS += bk7258_audio_dev.c
+endif
+
 include $(TOPDIR)/boards/Board.mk

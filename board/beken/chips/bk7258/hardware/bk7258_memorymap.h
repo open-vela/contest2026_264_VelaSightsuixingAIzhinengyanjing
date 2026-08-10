@@ -79,6 +79,28 @@
 #define BK7258_PSRAM_BASE          0x60000000u
 #define BK7258_PSRAM_SIZE          0x01000000u
 
+/* Analog audio (AUD) controller: internal 16-bit mono DAC + analog MIC
+ * ADC block (SOC_AUD_REG_BASE,
+ * bk_avdk_smp/ap/include/soc/bk7258/reg_base.h:99).  This board uses the
+ * chip's *internal* DAC only -- per the board schematic
+ * (AIDK_AI玩具开发板_原理图.pdf: sheet 2/6 main chip pin table lists
+ * AUDLN/AUDLP at physical pins 24/25, and the audio sheet shows AUDLP
+ * feeding U8 pin 4 (IN+) through C48), the differential AUDLP/AUDLN pair
+ * drives an HT6872 class-D power amplifier directly.  There is no I2S
+ * audio codec on this board, so no I2S register block is needed:
+ * BK7258's two selectable I2S1 pin groups (gpio_map.h
+ * GPIO_I2S_MAP_TABLE) are GPIO6-9 and GPIO40-43, and both are already
+ * taken here -- GPIO9 is the vibration motor's PWM3 output
+ * (bk7258_pwm.c BK7258_MOTOR_PWM_GPIO) and GPIO42/43 carry the GC2145
+ * camera's control bus, driven in software by
+ * bk7258_gc2145_i2c_bitbang.c.
+ *
+ * Note the AUD block lives inside the 0x40000000..0x5fffffff window that
+ * bk7258_start.c's last MPU region already maps as DEVICE/RWRW/XN, so no
+ * new MPU region is required to reach it.
+ */
+#define BK7258_AUD_BASE            0x47800000u
+
 #define BK7258_NVIC_BASE           0xe000e100u
 #define BK7258_SCB_BASE            0xe000ed00u
 #define BK7258_SAU_BASE            0xe000edd0u

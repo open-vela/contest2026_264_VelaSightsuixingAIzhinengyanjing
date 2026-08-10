@@ -10,8 +10,16 @@
 
 #include <arch/board/board.h>
 
+#ifdef CONFIG_FS_PROCFS
+#  include <nuttx/fs/fs.h>
+#endif
+
 #include "bk7258_psram.h"
 #include "hardware/bk7258_mbox.h"
+
+#ifdef CONFIG_BK7258_AUDIO
+#  include "bk7258_audio_bringup.h"
+#endif
 
 int bk7258_pwc_start(void);
 int bk7258_motor_setup(void);
@@ -23,6 +31,20 @@ int bk7258_bringup(void)
 {
   uint32_t button_count;
   int ret;
+
+#ifdef CONFIG_FS_PROCFS
+  /* Mount procfs first so that ps, free and the other informational NSH
+   * commands work even if a later bring-up step returns early. A mount
+   * failure is reported but never blocks bring-up: procfs is not required
+   * by the console data path.
+   */
+
+  ret = nx_mount(NULL, "/proc", "procfs", 0, NULL);
+  if (ret < 0)
+    {
+      printf("failed to mount procfs at /proc, error=%d\n", ret);
+    }
+#endif
 
   button_count = board_button_initialize();
 
@@ -110,4 +132,16 @@ void board_late_initialize(void)
    * driver cannot be masked by (or confused with) the old direct-call
    * path still running unconditionally at boot. */
   (void)bk7258_camera_initialize();
+
+#ifdef CONFIG_BK7258_AUDIO
+  /* Internal-DAC audio.  This has to come after bk7258_bringup() above,
+   * not from inside it, for the same reason the camera does: the AUD block
+   * needs the AUDP power domain and the AUD module clock, and both are
+   * requested from CP1 over the PWC mailbox channel that bk7258_pwc_start()
+   * brings up.  Registering the audio devices is best-effort -- a failure
+   * here must not take the console down with it.
+   */
+
+  (void)bk7258_audio_initialize();
+#endif
 }

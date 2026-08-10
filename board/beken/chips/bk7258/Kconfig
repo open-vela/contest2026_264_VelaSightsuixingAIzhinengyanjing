@@ -78,4 +78,91 @@ config BK7258_PSRAM_KEEP_POWERED
 		Retain the CPU1 PSRAM power vote for the AP lifetime. Dynamic PSRAM
 		power-down is not safe until all media and DMA leases are integrated.
 
+
+config BK7258_AUDIO
+	bool "BK7258 internal analog audio (AUD)"
+	default n
+	select AUDIO
+	help
+		Drive the chip's internal 16-bit mono DAC and analog MIC ADC. On this
+		board the differential AUDLP/AUDLN pair feeds an HT6872 class-D
+		amplifier whose CTRL (mute) pin is GPIO50, and there is no I2S codec.
+		Asks CP1 for the AUDP power domain and the AUD module clock over the
+		PWC mailbox channel.
+
+config BK7258_AUDIO_CAPTURE
+	bool "BK7258 audio capture (MIC1 + AEC reference)"
+	default n
+	depends on BK7258_AUDIO
+	help
+		Enable the ADC path. MIC1 (MICP1/MICN1) is the electret microphone.
+		When BK7258_AUDIO_AEC_REFERENCE is also set, MIC2 (MICP2/MICN2) is
+		enabled as well and carries the post-amplifier speaker feedback, so
+		captured frames are L/R interleaved with L = voice and R = echo
+		reference.
+
+config BK7258_AUDIO_AEC_REFERENCE
+	bool "Capture the MIC2 hardware echo reference"
+	default n
+	depends on BK7258_AUDIO_CAPTURE
+	help
+		The schematic taps HT6872 OUT+/OUT- through R84/R83 (39K) and
+		C61/C60 (1uF) into MIC2P/MIC2N so that AEC can have a hardware echo
+		reference, and ana_reg27 does have a full micen field for MIC2.
+
+		This defaults to n because the reference cannot actually be read on
+		BK7258: measured on hardware, the ADC delivers a single channel and
+		the upper half of every AUD_ADC_FIFO_PORT word stays zero. With a
+		tone audibly playing and MIC1 picking it up acoustically (RMS rising
+		from 25.7 to 36.4), MIC2 still returned exactly zero across 15872
+		samples. That matches the vendor HAL, where sys_hal_aud_mic2_en()
+		and sys_hal_aud_dacr_en() are both explicit "//not support" stubs
+		for this SoC: the register fields exist, the datapath does not.
+
+		Enabling this only costs half of every capture buffer to zeros. Use
+		a software AEC reference instead -- feed aec_proc() the same PCM
+		that was queued to the DAC, which is cleaner anyway (no analog
+		noise, no divider tolerance) and needs only a fixed delay
+		compensation for the DAC and amplifier.
+
+config BK7258_AUDIO_SAMPLERATE
+	int "Default audio sample rate"
+	default 16000
+	depends on BK7258_AUDIO
+	help
+		Used when the application does not configure a rate explicitly. Only
+		8000, 16000 and 32000 are currently reachable: the driver runs the
+		audio block from the 26 MHz crystal, and the 44100/48000 families
+		additionally require the APLL calibration sequence, which has not
+		been ported yet.
+
+config BK7258_AUDIO_PA_MUTE_GPIO
+	int "External amplifier mute GPIO"
+	default 50
+	depends on BK7258_AUDIO
+	help
+		BK7258 GPIO driving net MUTE, which reaches the HT6872 CTRL pin
+		through R70 (1K). R71 (10K) pulls it low, so the amplifier is muted
+		until software drives this pin high. Per the board schematic
+		(AIDK_AI玩具开发板_原理图.pdf) MUTE is P50.
+
+config BK7258_AUDIO_PA_ON_DELAY_MS
+	int "Delay between DAC enable and amplifier un-mute"
+	default 20
+	depends on BK7258_AUDIO
+	help
+		Mirrors onboard_speaker_stream's pa_on_delay: the DAC is started,
+		this delay elapses, then the amplifier is un-muted. Keeps the
+		amplifier off while the analog output settles so there is no pop.
+
+config BK7258_AUDIO_PA_OFF_DELAY_MS
+	int "Delay between DAC mute and amplifier shutdown"
+	default 10
+	depends on BK7258_AUDIO
+	help
+		Mirrors onboard_speaker_stream's pa_off_delay. Note the vendor's
+		header comment and its code disagree on where this delay sits; the
+		code order (mute, delay, amplifier off, DAC teardown) is the one that
+		actually suppresses the pop and is what this driver implements.
+
 endif

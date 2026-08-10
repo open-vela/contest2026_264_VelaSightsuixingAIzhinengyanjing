@@ -1,0 +1,7 @@
+############################################################################
+# BK7258 internal-DAC audio bring-up test - Make.defs
+############################################################################
+
+ifneq ($(CONFIG_LVX_USE_DEMO_CONTEST2026_264_AUDIO_TEST),)
+CONFIGURED_APPS += $(APPDIR)/packages/demos/contest2026_264_audio_test
+endif

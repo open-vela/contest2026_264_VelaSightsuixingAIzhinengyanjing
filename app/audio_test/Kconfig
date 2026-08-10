@@ -1,0 +1,18 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config LVX_USE_DEMO_CONTEST2026_264_AUDIO_TEST
+	bool "BK7258 internal-DAC audio bring-up test"
+	default n
+	depends on BK7258_AUDIO
+	---help---
+		Enable the audio_test NSH command: plays a synthesised tone through
+		the internal DAC, captures the analog MIC channels, and reports
+		per-channel DC/RMS/peak plus the correlation between the microphone
+		and the MIC2 post-amplifier echo reference.
+
+		This is a measurement command rather than a player or recorder: the
+		AP configuration has no writable filesystem, so there is nowhere to
+		store a WAV file.

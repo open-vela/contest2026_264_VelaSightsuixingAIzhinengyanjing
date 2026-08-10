@@ -21,7 +21,8 @@ set(SRCS
     bk7258_i2c_sim.c
     bk7258_gc2145_i2c_bitbang.c
     bk7258_yuv_buf.c
-    bk7258_camera_imgdata.c)
+    bk7258_camera_imgdata.c
+    bk7258_aud.c)
 
 add_library(bk7258_chip OBJECT ${SRCS})
 add_dependencies(bk7258_chip nuttx_context)

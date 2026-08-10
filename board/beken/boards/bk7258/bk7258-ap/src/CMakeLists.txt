@@ -9,6 +9,10 @@ set(SRCS
     bk7258_camera_imgsensor.c
     bk7258_camera_bringup.c)
 
+if(CONFIG_BK7258_AUDIO)
+  list(APPEND SRCS bk7258_audio_bringup.c bk7258_audio_dev.c)
+endif()
+
 target_sources(board PRIVATE ${SRCS})
 target_include_directories(board PRIVATE
   ${NUTTX_BOARD_ABS_DIR}/include
