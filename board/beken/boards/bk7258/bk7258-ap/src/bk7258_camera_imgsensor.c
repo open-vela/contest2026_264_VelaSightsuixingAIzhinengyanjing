@@ -32,6 +32,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <errno.h>
 
 #include <nuttx/video/imgsensor.h>
@@ -912,24 +913,49 @@ static int bk7258_gc2145_init(FAR struct imgsensor_s *sensor)
   FAR struct bk7258_gc2145_dev_s *priv =
       (FAR struct bk7258_gc2145_dev_s *)sensor;
 
+  printf("bk7258_camera_imgsensor: init: entry\n");
+
   bk7258_gc2145_power_on();
+  printf("bk7258_camera_imgsensor: init: power_on done\n");
+
   bk7258_gc2145_reset();
+  printf("bk7258_camera_imgsensor: init: reset done\n");
+
   bk7258_gc2145_dvp_pinmux();
+  printf("bk7258_camera_imgsensor: init: dvp_pinmux done\n");
+
   bk7258_gc2145_mclk_enable();
+  printf("bk7258_camera_imgsensor: init: mclk_enable done, "
+         "reg0x0a=0x%08x reg0x0d=0x%08x\n",
+         (unsigned int)getreg32(BK7258_SYS_REG_0X0A),
+         (unsigned int)getreg32(BK7258_SYS_REG_0X0D));
 
   bk7258_i2c1_init();
+  printf("bk7258_camera_imgsensor: init: i2c1_init done, writing %u "
+         "init registers\n", (unsigned int)GC2145_INIT_REG_COUNT);
 
   if (!bk7258_gc2145_write_reg_table(g_gc2145_init_regs,
                                       GC2145_INIT_REG_COUNT))
     {
+      printf("bk7258_camera_imgsensor: init: init register table write "
+             "FAILED\n");
       return -EIO;
     }
+
+  printf("bk7258_camera_imgsensor: init: init register table write OK, "
+         "writing %u resolution registers\n",
+         (unsigned int)GC2145_640_480_REG_COUNT);
 
   if (!bk7258_gc2145_write_reg_table(g_gc2145_640_480_regs,
                                       GC2145_640_480_REG_COUNT))
     {
+      printf("bk7258_camera_imgsensor: init: resolution register table "
+             "write FAILED\n");
       return -EIO;
     }
+
+  printf("bk7258_camera_imgsensor: init: complete, sensor should now "
+         "be continuously outputting DVP signal\n");
 
   priv->initialized = true;
   return OK;
@@ -981,10 +1007,14 @@ static int bk7258_gc2145_start_capture(
 {
   int ret;
 
+  printf("bk7258_camera_imgsensor: start_capture: entry\n");
+
   ret = bk7258_gc2145_validate_frame_setting(sensor, type, nr_datafmts,
                                               datafmts, interval);
   if (ret < 0)
     {
+      printf("bk7258_camera_imgsensor: start_capture: validate failed, "
+             "ret=%d\n", ret);
       return ret;
     }
 
@@ -995,12 +1025,22 @@ static int bk7258_gc2145_start_capture(
    * (YUV_BUF/DMA) is listening.
    */
 
+  printf("bk7258_camera_imgsensor: start_capture: OK (sensor already "
+         "streaming continuously since init)\n");
+
   return OK;
 }
 
 static int bk7258_gc2145_stop_capture(FAR struct imgsensor_s *sensor,
                                        imgsensor_stream_type_t type)
 {
+  /* v4l2_cap.c's complete_capture() calls IMGSENSOR_STOP_CAPTURE() from
+   * interrupt context when it runs out of vacant buffer containers, so
+   * this must not printf().  GC2145 keeps streaming regardless (no
+   * streaming-enable bit in this driver's register tables), so there is
+   * nothing to do here anyway.
+   */
+
   return OK;
 }
 

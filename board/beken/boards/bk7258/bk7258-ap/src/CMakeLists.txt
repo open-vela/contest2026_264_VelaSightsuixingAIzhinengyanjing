@@ -6,7 +6,6 @@ set(SRCS
     bk7258_motor.c
     bk7258_appinit.c
     bk7258_gc9d01.c
-    bk7258_gc2145.c
     bk7258_camera_imgsensor.c
     bk7258_camera_bringup.c)
 
