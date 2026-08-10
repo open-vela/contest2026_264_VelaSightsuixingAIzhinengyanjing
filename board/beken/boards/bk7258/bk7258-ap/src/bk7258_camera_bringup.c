@@ -12,6 +12,7 @@
 #include <nuttx/config.h>
 
 #include <stddef.h>
+#include <stdio.h>
 
 #include <nuttx/video/imgdata.h>
 #include <nuttx/video/imgsensor.h>
@@ -27,11 +28,16 @@ int bk7258_camera_initialize(void)
   FAR struct imgdata_s *imgdata;
   FAR struct imgsensor_s *imgsensor;
   FAR struct imgsensor_s *sensors[1];
+  int ret;
 
   imgdata = bk7258_camera_imgdata_initialize();
   imgsensor = bk7258_camera_imgsensor_initialize();
 
   sensors[0] = imgsensor;
 
-  return capture_register("/dev/video0", imgdata, sensors, 1);
+  ret = capture_register("/dev/video0", imgdata, sensors, 1);
+  printf("bk7258_camera_bringup: capture_register(\"/dev/video0\") "
+         "returned %d\n", ret);
+
+  return ret;
 }

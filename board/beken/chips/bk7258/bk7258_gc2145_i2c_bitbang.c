@@ -7,7 +7,14 @@
 #include <nuttx/clock.h>
 
 #include "bk7258_gpio.h"
-#include "bk7258_i2c1.h"
+
+/* This driver's own API declarations.  It used to include
+ * "bk7258_i2c1.h", which resolves to hardware/bk7258_i2c1.h -- the
+ * register map of the unused hardware I2C1 block -- so the
+ * implementation was never checked against its declarations.
+ */
+
+#include "bk7258_gc2145_i2c_bitbang.h"
 
 /* GPIO42/GPIO43: plain GPIO bit-bang, NOT the I2C1_SCL/I2C1_SDA hardware
  * pinmux function -- see this file's header comment.  No
@@ -258,6 +265,72 @@ bool bk7258_i2c1_sda_idle_diag(void)
   return all_high;
 }
 
+/* Read one bit: SDA must already be released to input.  Samples while
+ * SCL is high, mirroring bk7258_i2c1_send_byte()'s ACK sampling. */
+
+static bool bk7258_i2c1_read_bit(void)
+{
+  bool bit_value;
+
+  bk7258_i2c1_delay();
+
+  bk7258_i2c1_scl_high();
+  bk7258_i2c1_delay();
+
+  bit_value = bk7258_i2c1_sda_read();
+
+  bk7258_i2c1_scl_low();
+  bk7258_i2c1_delay();
+
+  return bit_value;
+}
+
+/* Receive one byte MSB-first, then drive the master's ACK (SDA low) or
+ * NACK (SDA high) on the 9th clock.  A single-byte read must NACK, which
+ * is how the slave is told to stop driving the bus before STOP.
+ */
+
+static uint8_t bk7258_i2c1_recv_byte(bool ack)
+{
+  uint8_t data = 0;
+  int bit;
+
+  bk7258_i2c1_sda_release();
+
+  for (bit = 7; bit >= 0; bit--)
+    {
+      if (bk7258_i2c1_read_bit())
+        {
+          data |= (uint8_t)(1u << bit);
+        }
+    }
+
+  /* Take SDA back to output for the ACK/NACK bit -- same reason
+   * bk7258_i2c1_send_byte() re-drives SDA after sampling ACK.
+   */
+
+  if (ack)
+    {
+      bk7258_i2c1_sda_low();
+    }
+  else
+    {
+      bk7258_i2c1_sda_high();
+    }
+
+  bk7258_i2c1_delay();
+
+  bk7258_i2c1_scl_high();
+  bk7258_i2c1_delay();
+
+  bk7258_i2c1_scl_low();
+  bk7258_i2c1_delay();
+
+  bk7258_i2c1_sda_high();
+
+  return data;
+}
+
 bool bk7258_i2c1_write_reg(uint8_t i2c_addr, uint8_t reg, uint8_t value)
 {
   bool acked;
@@ -295,4 +368,53 @@ bool bk7258_i2c1_write_reg(uint8_t i2c_addr, uint8_t reg, uint8_t value)
   bk7258_i2c1_stop();
 
   return acked;
+}
+
+bool bk7258_i2c1_read_reg(uint8_t i2c_addr, uint8_t reg,
+                          FAR uint8_t *value)
+{
+  if (value == NULL)
+    {
+      return false;
+    }
+
+  /* Write phase: address + register pointer, no STOP. */
+
+  bk7258_i2c1_start();
+
+  if (!bk7258_i2c1_send_byte((uint8_t)(i2c_addr << 1)))
+    {
+      bk7258_i2c1_stop();
+      printf("bk7258_i2c1: read NACK on write-address byte 0x%02x "
+             "(reg=0x%02x)\n", (unsigned int)(i2c_addr << 1), reg);
+      return false;
+    }
+
+  if (!bk7258_i2c1_send_byte(reg))
+    {
+      bk7258_i2c1_stop();
+      printf("bk7258_i2c1: read NACK on register-address byte 0x%02x\n",
+             reg);
+      return false;
+    }
+
+  /* Repeated START, then the same device address with the R/W bit set. */
+
+  bk7258_i2c1_start();
+
+  if (!bk7258_i2c1_send_byte((uint8_t)((i2c_addr << 1) | 1u)))
+    {
+      bk7258_i2c1_stop();
+      printf("bk7258_i2c1: read NACK on read-address byte 0x%02x "
+             "(reg=0x%02x)\n", (unsigned int)((i2c_addr << 1) | 1u), reg);
+      return false;
+    }
+
+  /* Single byte: the master must NACK it so the slave releases SDA. */
+
+  *value = bk7258_i2c1_recv_byte(false);
+
+  bk7258_i2c1_stop();
+
+  return true;
 }

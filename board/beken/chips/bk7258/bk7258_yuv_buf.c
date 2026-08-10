@@ -384,6 +384,15 @@ void bk7258_yuv_buf_configure(uint16_t width, uint16_t height)
             YUV_BUF_CTRL_VSYNC_REV | YUV_BUF_CTRL_MCLK_DIV_MASK |
             YUV_BUF_CTRL_BPS_CIS | YUV_BUF_CTRL_MEMREV |
             YUV_BUF_CTRL_H264_MODE);
+  /* yuv_fmt_sel describes the byte order the SENSOR puts on the DVP
+   * bus, which GC2145's register tables define as YUYV
+   * (dvp_gc2145.c's .fmt = PIXEL_FMT_YUYV, i.e. YUV_FORMAT_YUYV = 0).
+   * It is not the order this module writes to memory: a captured frame
+   * measured on hardware comes out as U Y V Y, which is why the V4L2
+   * layer advertises V4L2_PIX_FMT_UYVY (see
+   * bk7258_camera_imgsensor.c's g_bk7258_gc2145_fmtdescs).
+   */
+
   ctrl |= (YUV_BUF_FMT_YUYV << YUV_BUF_CTRL_YUV_FMT_SEL_SHIFT);
   ctrl |= YUV_BUF_CTRL_SYNC_EDGE_DECT_EN;
   ctrl |= (YUV_BUF_MCLK_DIV_3 << YUV_BUF_CTRL_MCLK_DIV_SHIFT);

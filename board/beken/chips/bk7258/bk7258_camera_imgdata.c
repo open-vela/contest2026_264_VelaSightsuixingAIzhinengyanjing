@@ -79,7 +79,7 @@
 #define BK7258_CAMERA_WIDTH   640u
 #define BK7258_CAMERA_HEIGHT  480u
 #define BK7258_CAMERA_FRAME_BYTES \
-  (BK7258_CAMERA_WIDTH * BK7258_CAMERA_HEIGHT * 2u) /* YUYV, 2 bytes/px */
+  (BK7258_CAMERA_WIDTH * BK7258_CAMERA_HEIGHT * 2u) /* UYVY, 2 bytes/px */
 
 /* YUV_BUF writes frames over the PSRAM bus; a frame buffer outside PSRAM
  * would be silently dropped (or corrupt unrelated memory), so set_buf()
@@ -115,6 +115,7 @@ struct bk7258_camera_imgdata_s
   volatile uint32_t timeouts;      /* Watchdog error reports. */
   volatile uint32_t set_buf_calls;
   volatile uint32_t rejected_bufs;
+  clock_t start_ticks;             /* For the measured frame rate. */
 };
 
 /****************************************************************************
@@ -414,7 +415,7 @@ static int bk7258_camera_imgdata_validate_frame_setting(
 
   if (datafmts[IMGDATA_FMT_MAIN].width != BK7258_CAMERA_WIDTH ||
       datafmts[IMGDATA_FMT_MAIN].height != BK7258_CAMERA_HEIGHT ||
-      datafmts[IMGDATA_FMT_MAIN].pixelformat != IMGDATA_PIX_FMT_YUYV)
+      datafmts[IMGDATA_FMT_MAIN].pixelformat != IMGDATA_PIX_FMT_UYVY)
     {
       return -EINVAL;
     }
@@ -460,6 +461,7 @@ static int bk7258_camera_imgdata_start_capture(
   bk7258_yuv_buf_set_frame_buffer((uint32_t)(uintptr_t)priv->frame_buf);
 
   priv->capturing = true;
+  priv->start_ticks = clock_systime_ticks();
   bk7258_yuv_buf_start();
   bk7258_camera_watchdog_arm(priv);
 
@@ -486,9 +488,20 @@ static int bk7258_camera_imgdata_stop_capture(FAR struct imgdata_s *data)
 
   if (!up_interrupt_context())
     {
-      printf("bk7258_camera_imgdata: stop_capture: frames=%u timeouts=%u\n",
+      uint32_t ms = TICK2MSEC(clock_systime_ticks() - priv->start_ticks);
+
+      /* Measured frame rate, not the requested one: the only way to see
+       * whether the sensor's programmed rate is what the hardware
+       * actually delivers.
+       */
+
+      printf("bk7258_camera_imgdata: stop_capture: frames=%u timeouts=%u "
+             "elapsed=%ums measured=%u.%02u fps\n",
              (unsigned int)priv->frames_done,
-             (unsigned int)priv->timeouts);
+             (unsigned int)priv->timeouts, (unsigned int)ms,
+             (unsigned int)(ms ? priv->frames_done * 1000u / ms : 0u),
+             (unsigned int)(ms ? priv->frames_done * 100000u / ms % 100u
+                               : 0u));
     }
 
   return OK;

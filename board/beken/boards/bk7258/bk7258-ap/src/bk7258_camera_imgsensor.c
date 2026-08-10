@@ -83,6 +83,26 @@
 #define GC2145_CAPTURE_WIDTH   640u
 #define GC2145_CAPTURE_HEIGHT  480u
 
+/* GC2145 identity registers, per dvp_gc2145.c's CHIP_ID_ADDR_HB/LB and
+ * CHIP_ID_VAL_HB/LB.  Readable only after power-on + MCLK, which is why
+ * the check lives in init() rather than in is_available().
+ */
+
+#define GC2145_CHIP_ID_REG_HI  0xF0u
+#define GC2145_CHIP_ID_REG_LO  0xF1u
+#define GC2145_CHIP_ID_VAL_HI  0x21u
+#define GC2145_CHIP_ID_VAL_LO  0x45u
+
+/* Frame rates this driver can program at 640x480.  The reference's four
+ * tables (sensor_gc2145_640_480_{30,25,20,15}fps_table in dvp_gc2145.c)
+ * are byte-identical except for registers 0x07/0x08 -- the frame-length
+ * (dummy line) high/low pair -- so they are represented here as one
+ * shared table plus the per-rate 0x07/0x08 values, rather than four
+ * near-duplicate copies.
+ */
+
+#define GC2145_FPS_DEFAULT     30u
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
@@ -97,6 +117,7 @@ struct bk7258_gc2145_dev_s
 {
   struct imgsensor_s sensor;    /* Must be first: base-pointer cast. */
   bool initialized;
+  uint32_t current_fps;         /* Frame rate actually programmed. */
 };
 
 /****************************************************************************
@@ -118,6 +139,9 @@ static int  bk7258_gc2145_start_capture(
     FAR imgsensor_interval_t *interval);
 static int  bk7258_gc2145_stop_capture(FAR struct imgsensor_s *sensor,
                                         imgsensor_stream_type_t type);
+static int  bk7258_gc2145_get_frame_interval(
+    FAR struct imgsensor_s *sensor, imgsensor_stream_type_t type,
+    FAR imgsensor_interval_t *interval);
 
 /****************************************************************************
  * Private Data
@@ -777,6 +801,7 @@ static const struct imgsensor_ops_s g_bk7258_gc2145_ops =
   .validate_frame_setting = bk7258_gc2145_validate_frame_setting,
   .start_capture          = bk7258_gc2145_start_capture,
   .stop_capture           = bk7258_gc2145_stop_capture,
+  .get_frame_interval     = bk7258_gc2145_get_frame_interval,
 };
 
 /* Static capability descriptors: single discrete resolution/format,
@@ -784,12 +809,23 @@ static const struct imgsensor_ops_s g_bk7258_gc2145_ops =
  * switching).
  */
 
+/* UYVY, not YUYV: the byte order YUV_BUF writes into the frame buffer is
+ * U Y V Y.  Measured on hardware by dumping a captured frame -- read as
+ * UYVY the chroma planes sit at ~128 with luma carrying the image's
+ * dynamic range (18..153 over 120 rows), while read as YUYV the "luma"
+ * is pinned near 128 and both chroma channels swing together, which no
+ * real scene produces.  Note ctrl.yuv_fmt_sel stays at YUV_FORMAT_YUYV
+ * (0) in bk7258_yuv_buf.c: that field describes the order the sensor
+ * puts on the DVP bus, which is a separate thing from the order the
+ * module writes to memory.
+ */
+
 static const struct v4l2_fmtdesc g_bk7258_gc2145_fmtdescs[] =
 {
   {
     .index = 0,
     .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-    .pixelformat = V4L2_PIX_FMT_YUYV,
+    .pixelformat = V4L2_PIX_FMT_UYVY,
   },
 };
 
@@ -807,6 +843,92 @@ static const struct v4l2_frmsizeenum g_bk7258_gc2145_frmsizes[] =
   },
 };
 
+/* Frame intervals actually programmable at 640x480 (see
+ * g_gc2145_fps_regs).  Reported through VIDIOC_ENUM_FRAMEINTERVALS so
+ * applications can discover them instead of guessing.
+ */
+
+static const struct v4l2_frmivalenum g_bk7258_gc2145_frmintervals[] =
+{
+  {
+    .index = 0, .buf_type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+    .pixel_format = V4L2_PIX_FMT_UYVY,
+    .width = GC2145_CAPTURE_WIDTH, .height = GC2145_CAPTURE_HEIGHT,
+    .type = V4L2_FRMIVAL_TYPE_DISCRETE,
+    .discrete = { .numerator = 1, .denominator = 30 },
+  },
+  {
+    .index = 1, .buf_type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+    .pixel_format = V4L2_PIX_FMT_UYVY,
+    .width = GC2145_CAPTURE_WIDTH, .height = GC2145_CAPTURE_HEIGHT,
+    .type = V4L2_FRMIVAL_TYPE_DISCRETE,
+    .discrete = { .numerator = 1, .denominator = 25 },
+  },
+  {
+    .index = 2, .buf_type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+    .pixel_format = V4L2_PIX_FMT_UYVY,
+    .width = GC2145_CAPTURE_WIDTH, .height = GC2145_CAPTURE_HEIGHT,
+    .type = V4L2_FRMIVAL_TYPE_DISCRETE,
+    .discrete = { .numerator = 1, .denominator = 20 },
+  },
+  {
+    .index = 3, .buf_type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+    .pixel_format = V4L2_PIX_FMT_UYVY,
+    .width = GC2145_CAPTURE_WIDTH, .height = GC2145_CAPTURE_HEIGHT,
+    .type = V4L2_FRMIVAL_TYPE_DISCRETE,
+    .discrete = { .numerator = 1, .denominator = 15 },
+  },
+};
+
+/* Per-rate frame-length registers (page 0: 0x07 high, 0x08 low),
+ * extracted from the reference's four 640x480 fps tables. */
+
+struct gc2145_fps_regs
+{
+  uint32_t fps;
+  uint8_t reg07;
+  uint8_t reg08;
+};
+
+static const struct gc2145_fps_regs g_gc2145_fps_regs[] =
+{
+  { 30u, 0x00u, 0xA0u },
+  { 25u, 0x01u, 0x7Au },
+  { 20u, 0x03u, 0x02u },
+  { 15u, 0x05u, 0x50u },
+};
+
+#define GC2145_FPS_COUNT \
+  (sizeof(g_gc2145_fps_regs) / sizeof(g_gc2145_fps_regs[0]))
+
+/* Everything the four fps tables have in common: page select, the fixed
+ * 0x05/0x06 pair, then page 1's exposure-window registers.  0x07/0x08
+ * are written between these two halves by
+ * bk7258_gc2145_set_frame_rate().
+ */
+
+static const struct gc2145_reg g_gc2145_fps_prefix[] =
+{
+  { 0xFE, 0x00 }, { 0x05, 0x01 }, { 0x06, 0x56 },
+};
+
+static const struct gc2145_reg g_gc2145_fps_suffix[] =
+{
+  { 0xFE, 0x01 }, { 0x25, 0x01 }, { 0x26, 0x63 },
+  { 0x27, 0x04 }, { 0x28, 0x29 }, { 0x29, 0x04 }, { 0x2A, 0x29 },
+  { 0x2B, 0x04 }, { 0x2C, 0x29 }, { 0x2D, 0x04 }, { 0x2E, 0x29 },
+  { 0xFE, 0x00 },
+};
+
+#define GC2145_FRMINTERVALS_COUNT \
+  (sizeof(g_bk7258_gc2145_frmintervals) / \
+   sizeof(g_bk7258_gc2145_frmintervals[0]))
+
+#define GC2145_FPS_PREFIX_COUNT \
+  (sizeof(g_gc2145_fps_prefix) / sizeof(g_gc2145_fps_prefix[0]))
+#define GC2145_FPS_SUFFIX_COUNT \
+  (sizeof(g_gc2145_fps_suffix) / sizeof(g_gc2145_fps_suffix[0]))
+
 static struct bk7258_gc2145_dev_s g_bk7258_gc2145 =
 {
   .sensor =
@@ -816,9 +938,10 @@ static struct bk7258_gc2145_dev_s g_bk7258_gc2145 =
       .fmtdescs = g_bk7258_gc2145_fmtdescs,
       .frmsizes_num = 1,
       .frmsizes = g_bk7258_gc2145_frmsizes,
-      .frmintervals_num = 0,
-      .frmintervals = NULL,
+      .frmintervals_num = GC2145_FRMINTERVALS_COUNT,
+      .frmintervals = g_bk7258_gc2145_frmintervals,
     },
+  .current_fps = GC2145_FPS_DEFAULT,
 };
 
 /****************************************************************************
@@ -898,11 +1021,101 @@ static bool bk7258_gc2145_write_reg_table(const struct gc2145_reg *table,
   return true;
 }
 
+/* Symmetric counterpart of power_on()/reset()/mclk_enable(): assert
+ * reset, cut the sensor's supply and close the MCLK clock gate.  Without
+ * this, closing /dev/video0 left GPIO49 driving both DVP LDOs and the
+ * AUXS_CIS clock running, i.e. the camera kept burning power with nobody
+ * using it -- which matters on a battery-powered product.
+ */
+
+static void bk7258_gc2145_power_off(void)
+{
+  uint32_t reg;
+
+  bk7258_gpio_output(DVP_RESET_PIN, false);
+
+  reg = getreg32(BK7258_SYS_REG_0X0D);
+  reg &= ~BK7258_SYS_CIS_AUXS_CKEN;
+  putreg32(reg, BK7258_SYS_REG_0X0D);
+
+  bk7258_gpio_output(DVP_POWER_PIN, false);
+}
+
+/* Programs the frame length for the requested rate.  GC2145 has no
+ * dedicated frame-rate register: the rate follows from the frame length
+ * (dummy lines) in page-0 registers 0x07/0x08, which is why the
+ * reference ships one register table per rate.
+ */
+
+static bool bk7258_gc2145_set_frame_rate(
+    FAR struct bk7258_gc2145_dev_s *priv, uint32_t fps)
+{
+  size_t i;
+
+  for (i = 0; i < GC2145_FPS_COUNT; i++)
+    {
+      if (g_gc2145_fps_regs[i].fps == fps)
+        {
+          break;
+        }
+    }
+
+  if (i == GC2145_FPS_COUNT)
+    {
+      return false;
+    }
+
+  if (!bk7258_gc2145_write_reg_table(g_gc2145_fps_prefix,
+                                     GC2145_FPS_PREFIX_COUNT) ||
+      !bk7258_i2c1_write_reg(GC2145_I2C_ADDR, 0x07u,
+                             g_gc2145_fps_regs[i].reg07) ||
+      !bk7258_i2c1_write_reg(GC2145_I2C_ADDR, 0x08u,
+                             g_gc2145_fps_regs[i].reg08) ||
+      !bk7258_gc2145_write_reg_table(g_gc2145_fps_suffix,
+                                     GC2145_FPS_SUFFIX_COUNT))
+    {
+      return false;
+    }
+
+  priv->current_fps = fps;
+  return true;
+}
+
+/* Reads GC2145's identity registers.  This is the only real proof that
+ * the sensor is present, powered and talking -- the 585-entry init table
+ * is write-only, so before this the driver could not distinguish "sensor
+ * ACKed and configured" from "something on the bus ACKed".
+ */
+
+static bool bk7258_gc2145_check_chip_id(void)
+{
+  uint8_t hi = 0;
+  uint8_t lo = 0;
+
+  if (!bk7258_i2c1_read_reg(GC2145_I2C_ADDR, GC2145_CHIP_ID_REG_HI, &hi) ||
+      !bk7258_i2c1_read_reg(GC2145_I2C_ADDR, GC2145_CHIP_ID_REG_LO, &lo))
+    {
+      printf("bk7258_camera_imgsensor: chip ID read failed\n");
+      return false;
+    }
+
+  printf("bk7258_camera_imgsensor: chip ID = 0x%02x%02x (expected "
+         "0x%02x%02x)\n", hi, lo,
+         GC2145_CHIP_ID_VAL_HI, GC2145_CHIP_ID_VAL_LO);
+
+  return hi == GC2145_CHIP_ID_VAL_HI && lo == GC2145_CHIP_ID_VAL_LO;
+}
+
 static bool bk7258_gc2145_is_available(FAR struct imgsensor_s *sensor)
 {
-  /* GC2145's ported register tables do not use a readable chip-ID
-   * register.  Availability is proven by bk7258_gc2145_init()'s
-   * register writes succeeding, not by a probe here.
+  /* Deliberately unconditional.  A real probe would have to power the
+   * sensor, start MCLK and run an I2C transaction, and this is called
+   * from capture_register() during board bring-up -- doing all that here
+   * would move the camera's power sequencing into boot, and a bus
+   * glitch at that moment would make /dev/video0 disappear entirely
+   * with no way to retry.  The identity check therefore runs inside
+   * init() (bk7258_gc2145_check_chip_id()), where it reports a mismatch
+   * without taking the device node away.
    */
 
   return true;
@@ -931,14 +1144,31 @@ static int bk7258_gc2145_init(FAR struct imgsensor_s *sensor)
          (unsigned int)getreg32(BK7258_SYS_REG_0X0D));
 
   bk7258_i2c1_init();
-  printf("bk7258_camera_imgsensor: init: i2c1_init done, writing %u "
-         "init registers\n", (unsigned int)GC2145_INIT_REG_COUNT);
+  printf("bk7258_camera_imgsensor: init: i2c1_init done\n");
+
+  /* Identity check before the 585-entry blind write, so a wiring or bus
+   * problem is reported as such instead of surfacing later as a
+   * mid-table NACK.  A mismatch is reported but not fatal: the register
+   * tables are known to work on this board, and refusing to continue
+   * would turn any future read-timing regression into "the camera is
+   * gone".
+   */
+
+  if (!bk7258_gc2145_check_chip_id())
+    {
+      printf("bk7258_camera_imgsensor: init: chip ID mismatch or read "
+             "failure, continuing anyway\n");
+    }
+
+  printf("bk7258_camera_imgsensor: init: writing %u init registers\n",
+         (unsigned int)GC2145_INIT_REG_COUNT);
 
   if (!bk7258_gc2145_write_reg_table(g_gc2145_init_regs,
                                       GC2145_INIT_REG_COUNT))
     {
       printf("bk7258_camera_imgsensor: init: init register table write "
              "FAILED\n");
+      bk7258_gc2145_power_off();
       return -EIO;
     }
 
@@ -951,11 +1181,21 @@ static int bk7258_gc2145_init(FAR struct imgsensor_s *sensor)
     {
       printf("bk7258_camera_imgsensor: init: resolution register table "
              "write FAILED\n");
+      bk7258_gc2145_power_off();
       return -EIO;
     }
 
-  printf("bk7258_camera_imgsensor: init: complete, sensor should now "
-         "be continuously outputting DVP signal\n");
+  if (!bk7258_gc2145_set_frame_rate(priv, GC2145_FPS_DEFAULT))
+    {
+      printf("bk7258_camera_imgsensor: init: %ufps program FAILED\n",
+             (unsigned int)GC2145_FPS_DEFAULT);
+      bk7258_gc2145_power_off();
+      return -EIO;
+    }
+
+  printf("bk7258_camera_imgsensor: init: complete at %ufps, sensor now "
+         "continuously outputting DVP signal\n",
+         (unsigned int)priv->current_fps);
 
   priv->initialized = true;
   return OK;
@@ -966,7 +1206,12 @@ static int bk7258_gc2145_uninit(FAR struct imgsensor_s *sensor)
   FAR struct bk7258_gc2145_dev_s *priv =
       (FAR struct bk7258_gc2145_dev_s *)sensor;
 
+  bk7258_gc2145_power_off();
   priv->initialized = false;
+
+  printf("bk7258_camera_imgsensor: uninit: sensor powered off, MCLK "
+         "gate closed\n");
+
   return OK;
 }
 
@@ -986,15 +1231,41 @@ static int bk7258_gc2145_validate_frame_setting(
       return -EINVAL;
     }
 
-  /* Only 640x480 YUYV is supported -- this driver's register tables do
-   * not implement any other resolution.
+  /* Only 640x480 UYVY is supported -- this driver's register tables do
+   * not implement any other resolution, and UYVY is the byte order the
+   * capture path actually produces (see g_bk7258_gc2145_fmtdescs).
    */
 
   if (datafmts[IMGSENSOR_FMT_MAIN].width != GC2145_CAPTURE_WIDTH ||
       datafmts[IMGSENSOR_FMT_MAIN].height != GC2145_CAPTURE_HEIGHT ||
-      datafmts[IMGSENSOR_FMT_MAIN].pixelformat != IMGSENSOR_PIX_FMT_YUYV)
+      datafmts[IMGSENSOR_FMT_MAIN].pixelformat != IMGSENSOR_PIX_FMT_UYVY)
     {
       return -EINVAL;
+    }
+
+  /* A requested frame rate must be one this driver can actually
+   * program; silently accepting an arbitrary rate and then running at a
+   * different one is what made the `30` in `stream 640 480 30` a lie.
+   */
+
+  if (interval != NULL && interval->denominator != 0)
+    {
+      uint32_t fps = interval->denominator / (interval->numerator ?
+                                             interval->numerator : 1);
+      size_t i;
+
+      for (i = 0; i < GC2145_FPS_COUNT; i++)
+        {
+          if (g_gc2145_fps_regs[i].fps == fps)
+            {
+              break;
+            }
+        }
+
+      if (i == GC2145_FPS_COUNT)
+        {
+          return -EINVAL;
+        }
     }
 
   return OK;
@@ -1005,6 +1276,8 @@ static int bk7258_gc2145_start_capture(
     uint8_t nr_datafmts, FAR imgsensor_format_t *datafmts,
     FAR imgsensor_interval_t *interval)
 {
+  FAR struct bk7258_gc2145_dev_s *priv =
+      (FAR struct bk7258_gc2145_dev_s *)sensor;
   int ret;
 
   printf("bk7258_camera_imgsensor: start_capture: entry\n");
@@ -1018,15 +1291,58 @@ static int bk7258_gc2145_start_capture(
       return ret;
     }
 
+  /* Apply the requested frame rate if it differs from what is already
+   * programmed.  validate_frame_setting() above has already rejected
+   * rates this driver cannot produce.
+   */
+
+  if (interval != NULL && interval->denominator != 0)
+    {
+      uint32_t fps = interval->denominator / (interval->numerator ?
+                                             interval->numerator : 1);
+
+      if (fps != priv->current_fps &&
+          !bk7258_gc2145_set_frame_rate(priv, fps))
+        {
+          printf("bk7258_camera_imgsensor: start_capture: %ufps program "
+                 "FAILED\n", (unsigned int)fps);
+          return -EIO;
+        }
+    }
+
   /* GC2145 has no separate streaming-enable register in this driver's
    * ported tables -- the sensor outputs DVP data continuously once its
    * init sequence completes in bk7258_gc2145_init().  Capture
    * start/stop is entirely a matter of whether the imgdata half
-   * (YUV_BUF/DMA) is listening.
+   * (YUV_BUF) is listening.
    */
 
-  printf("bk7258_camera_imgsensor: start_capture: OK (sensor already "
-         "streaming continuously since init)\n");
+  printf("bk7258_camera_imgsensor: start_capture: OK at %ufps (sensor "
+         "streaming continuously since init)\n",
+         (unsigned int)priv->current_fps);
+
+  return OK;
+}
+
+static int bk7258_gc2145_get_frame_interval(
+    FAR struct imgsensor_s *sensor, imgsensor_stream_type_t type,
+    FAR imgsensor_interval_t *interval)
+{
+  FAR struct bk7258_gc2145_dev_s *priv =
+      (FAR struct bk7258_gc2145_dev_s *)sensor;
+
+  if (interval == NULL)
+    {
+      return -EINVAL;
+    }
+
+  /* Report the rate that is actually programmed, so VIDIOC_G_PARM
+   * reflects hardware state rather than whatever the caller last asked
+   * for.
+   */
+
+  interval->numerator = 1;
+  interval->denominator = priv->current_fps;
 
   return OK;
 }

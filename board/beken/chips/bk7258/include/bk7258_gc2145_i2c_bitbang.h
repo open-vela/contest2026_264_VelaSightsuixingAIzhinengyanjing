@@ -60,6 +60,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <nuttx/compiler.h>
+
 /* Idles the bus (SDA and SCL both driven high) so the first
  * bk7258_i2c1_write_reg() call's START condition begins from a clean
  * state.  No pinmux/clock-gate/interrupt setup is needed or performed
@@ -87,6 +89,16 @@ bool bk7258_i2c1_write_reg(uint8_t i2c_addr, uint8_t reg, uint8_t value);
  * reliably read a high level (no working pull-up -- internal or the
  * board's external R42 -- or SDA stuck low/shorted), which would make
  * every subsequent "NACK" meaningless as sensor-behavior evidence. */
+/* Reads a single 8-bit register from the 7-bit I2C device address
+ * i2c_addr, using the standard write-pointer / repeated-START / read
+ * sequence, and NACKing the single data byte so the slave releases SDA
+ * before STOP.  Returns true and stores the byte in *value on success;
+ * false if any address/register byte was NACKed.  Needed for sensor
+ * identity checks (GC2145 reports 0x21/0x45 in registers 0xF0/0xF1),
+ * which a write-only driver cannot perform. */
+bool bk7258_i2c1_read_reg(uint8_t i2c_addr, uint8_t reg,
+                          FAR uint8_t *value);
+
 bool bk7258_i2c1_sda_idle_diag(void);
 
 #endif /* __VENDOR_BEKEN_CHIPS_BK7258_INCLUDE_BK7258_I2C1_H */
