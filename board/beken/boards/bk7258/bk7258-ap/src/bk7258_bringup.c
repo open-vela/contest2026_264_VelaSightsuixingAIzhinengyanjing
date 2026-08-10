@@ -15,6 +15,7 @@
 #endif
 
 #include "bk7258_psram.h"
+#include "bk7258_ramdisk.h"
 #include "hardware/bk7258_mbox.h"
 
 #ifdef CONFIG_BK7258_AUDIO
@@ -80,6 +81,13 @@ int bk7258_bringup(void)
     {
       printf("PSRAM online, base=0x60000000 size=0x01000000 "
              "RW/XN/non-cacheable\n");
+
+      /* PSRAM-backed /dev/ram0: the only storage on this board big enough
+       * to hold a captured frame as a file (tmpfs lives in the ~300KB
+       * kernel heap, one 640x480 YUYV frame is 614400 bytes).
+       */
+
+      (void)bk7258_ramdisk_initialize();
       /* printf("PSRAM CP heap 0x60700000..0x6071ffff reserved\n"); */
       /* bk7258_psram_dump(); */
     }

@@ -12,6 +12,7 @@ CSRCS += bk7258_motor.c
 CSRCS += bk7258_appinit.c
 CSRCS += bk7258_leds.c
 CSRCS += bk7258_gc9d01.c
+CSRCS += bk7258_ramdisk.c
 CSRCS += bk7258_camera_imgsensor.c
 CSRCS += bk7258_camera_bringup.c
 
