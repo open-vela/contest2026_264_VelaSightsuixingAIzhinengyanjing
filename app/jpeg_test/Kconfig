@@ -1,0 +1,21 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config LVX_USE_DEMO_CONTEST2026_264_JPEG_TEST
+	bool "BK7258 V4L2 M2M JPEG encoder test"
+	default n
+	depends on BK7258_JPEG_ENC
+	---help---
+		Enable the jpeg_test NSH command: builds a synthetic YUV frame in
+		memory, pushes it through the V4L2 M2M JPEG encoder, and reports the
+		encoded size, elapsed time and compression ratio.
+
+		Needing no camera is the point -- the codec can be verified while the
+		capture path is still being developed.
+
+		The frame is colour bars over a luma ramp rather than noise, so
+		'jpeg_test dump' produces a base64 JPEG that can be rebuilt on a host
+		and checked by eye: a swapped chroma plane or a wrong stride is
+		obvious in the picture but invisible in the compression ratio.
