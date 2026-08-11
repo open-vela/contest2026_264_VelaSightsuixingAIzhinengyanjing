@@ -24,6 +24,10 @@
 #  include "bk7258_audio_bringup.h"
 #endif
 
+#ifdef CONFIG_BK7258_JPEG_ENC
+#  include "bk7258_jpeg_enc.h"
+#endif
+
 int bk7258_pwc_start(void);
 int bk7258_motor_setup(void);
 int bk7258_power_key_motor_start(void);
@@ -174,5 +178,15 @@ void board_late_initialize(void)
    */
 
   (void)bk7258_audio_initialize();
+#endif
+
+#ifdef CONFIG_BK7258_JPEG_ENC
+  /* After the camera: both want PSRAM, and registering the encoder second
+   * keeps /dev/video0 belonging to capture and /dev/video1 to this codec no
+   * matter how the framework numbers them internally.  Best-effort, like the
+   * others -- a codec that fails to register must not take the console down.
+   */
+
+  (void)bk7258_jpeg_enc_initialize();
 #endif
 }

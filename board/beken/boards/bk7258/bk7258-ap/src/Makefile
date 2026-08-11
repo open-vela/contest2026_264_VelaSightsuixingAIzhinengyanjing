@@ -25,4 +25,8 @@ CSRCS += bk7258_audio_bringup.c
 CSRCS += bk7258_audio_dev.c
 endif
 
+ifeq ($(CONFIG_BK7258_JPEG_ENC),y)
+CSRCS += bk7258_jpeg_enc.c
+endif
+
 include $(TOPDIR)/boards/Board.mk

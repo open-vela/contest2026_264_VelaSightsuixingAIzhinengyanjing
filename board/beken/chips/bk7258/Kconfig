@@ -165,4 +165,41 @@ config BK7258_AUDIO_PA_OFF_DELAY_MS
 		code order (mute, delay, amplifier off, DAC teardown) is the one that
 		actually suppresses the pop and is what this driver implements.
 
+config BK7258_JPEG_ENC
+	bool "BK7258 V4L2 M2M JPEG encoder (software)"
+	default n
+	depends on VIDEO && DRIVERS_VIDEO
+	select LIB_JPEG_TURBO
+	select BK7258_PSRAM
+	select SCHED_HPWORK
+	help
+		Register a V4L2 M2M codec that takes raw YUV on the OUTPUT queue and
+		produces JPEG on the CAPTURE queue.
+
+		This is a software encoder built on libjpeg-turbo. The chip's hardware
+		JPEG block is fed by the DVP camera interface and cannot read pixels
+		from memory, so it cannot back a memory-to-memory codec; that block
+		belongs to the capture driver instead.
+
+		Buffers are allocated from PSRAM, since one 640x480 frame exceeds the
+		AP's entire malloc heap.
+
+if BK7258_JPEG_ENC
+
+config BK7258_JPEG_ENC_DEV_PATH
+	string "Device node"
+	default "/dev/video1"
+	help
+		Kept off /dev/video0 so the camera capture driver can own that node.
+
+config BK7258_JPEG_ENC_QUALITY
+	int "Default JPEG quality (1-100)"
+	default 80
+	range 1 100
+	help
+		Applications can override this at runtime with
+		V4L2_CID_JPEG_COMPRESSION_QUALITY.
+
+endif
+
 endif
