@@ -105,6 +105,17 @@
 #define BK7258_JPEG_SRAM_MAX       (128 * 1024)
 #define BK7258_JPEG_SRAM_MARGIN    (64 * 1024)
 
+/* Large pools come from psram-encode.
+ *
+ * PSRAM is divided into named pools (bk7258_psram.c).  psram-encode exists
+ * for exactly this and holds 1.4 MB; the general heap it used to take from
+ * is shared with the 2 MB ramdisk, and capture buffers come out of
+ * psram-display.  Keeping each subsystem in its own pool means the camera
+ * and the encoder cannot starve each other.
+ */
+
+#define BK7258_JPEG_POOL           BK7258_PSRAM_POOL_ENCODE
+
 #define BK7258_JPEG_THREAD_PRIO    80
 #define BK7258_JPEG_THREAD_STACK   8192
 
@@ -274,7 +285,8 @@ static struct codec_s g_bk7258_jpeg_codec =
 static const uint32_t g_output_formats[] =
 {
   V4L2_PIX_FMT_YUV420,          /* I420, planar 4:2:0 */
-  V4L2_PIX_FMT_UYVY,            /* interleaved 4:2:2, what the camera reports */
+  V4L2_PIX_FMT_UYVY,            /* interleaved 4:2:2, textbook Cb Y0 Cr Y1 */
+  V4L2_PIX_FMT_VYUY,            /* interleaved 4:2:2, this board's camera */
 };
 
 #define BK7258_JPEG_NOUTPUT_FMTS \
@@ -283,6 +295,38 @@ static const uint32_t g_output_formats[] =
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
+
+/* Where each component sits within a 4:2:2 pixel pair.
+ *
+ * off_y0 and off_y1 are the luma of the pair's even and odd column.  Keeping
+ * them separate is what makes the camera's layout expressible: its chroma
+ * bytes are in VYUY positions but its two luma samples are stored in reverse
+ * column order, so no fourcc names it exactly.
+ */
+
+struct bk7258_jpeg_order_s
+{
+  uint8_t off_cb;
+  uint8_t off_cr;
+  uint8_t off_y0;
+  uint8_t off_y1;
+};
+
+/* Textbook UYVY, and what YUV_BUF actually produces.
+ *
+ * The second entry matches camera_preview's "VYUY-R" and the measurements
+ * behind it: the four bus bytes Y0 Cb Y1 Cr arrive reversed as Cr Y1 Cb Y0.
+ */
+
+static const struct bk7258_jpeg_order_s g_uyvy_order =
+{
+  0, 2, 1, 3
+};
+
+static const struct bk7258_jpeg_order_s g_vyuy_order =
+{
+  2, 0, 3, 1
+};
 
 /****************************************************************************
  * Name: bk7258_jpeg_raw_size
@@ -301,6 +345,7 @@ static size_t bk7258_jpeg_raw_size(uint32_t pixelformat,
         return (size_t)width * height * 3 / 2;
 
       case V4L2_PIX_FMT_UYVY:
+      case V4L2_PIX_FMT_VYUY:
         return (size_t)width * height * 2;
 
       default:
@@ -320,7 +365,8 @@ static size_t bk7258_jpeg_raw_size(uint32_t pixelformat,
 static size_t bk7258_jpeg_scratch_size(uint32_t pixelformat,
                                        uint32_t width, uint32_t height)
 {
-  if (pixelformat == V4L2_PIX_FMT_UYVY)
+  if (pixelformat == V4L2_PIX_FMT_UYVY ||
+      pixelformat == V4L2_PIX_FMT_VYUY)
     {
       /* 4:2:2 planar: full luma plus two half-width chroma planes. */
 
@@ -357,19 +403,23 @@ static void bk7258_jpeg_describe_i420(struct bk7258_jpeg_planes_s *planes,
 }
 
 /****************************************************************************
- * Name: bk7258_jpeg_deinterleave_uyvy
+ * Name: bk7258_jpeg_deinterleave
  *
  * Description:
- *   Split UYVY into Y, Cb and Cr planes, staying at 4:2:2.
+ *   Split an interleaved 4:2:2 frame into Y, Cb and Cr planes, staying at
+ *   4:2:2.  One chroma sample per pixel pair per plane and two luma samples.
  *
- *   Byte order is U Y0 V Y1 per pixel pair, so one chroma sample per pair
- *   per plane and two luma samples.  Vertical resolution is left alone --
- *   dropping to 4:2:0 here would discard chroma rows the source really has.
+ *   Vertical resolution is left alone -- dropping to 4:2:0 here would
+ *   discard chroma rows the source really has.
+ *
+ *   The layout comes in as a table so the camera's reversed byte order costs
+ *   no second copy of this loop.
  *
  ****************************************************************************/
 
-static void bk7258_jpeg_deinterleave_uyvy(
+static void bk7258_jpeg_deinterleave(
                                 struct bk7258_jpeg_planes_s *planes,
+                                const struct bk7258_jpeg_order_s *order,
                                 const uint8_t *src, uint8_t *scratch,
                                 uint32_t width, uint32_t height)
 {
@@ -390,10 +440,10 @@ static void bk7258_jpeg_deinterleave_uyvy(
 
       for (col = 0; col + 1 < width; col += 2)
         {
-          *ud++ = s[0];
-          *yd++ = s[1];
-          *vd++ = s[2];
-          *yd++ = s[3];
+          *ud++ = s[order->off_cb];
+          *vd++ = s[order->off_cr];
+          *yd++ = s[order->off_y0];
+          *yd++ = s[order->off_y1];
           s += 4;
         }
     }
@@ -447,13 +497,16 @@ static int bk7258_jpeg_compress(struct bk7258_jpeg_enc_s *enc,
         break;
 
       case V4L2_PIX_FMT_UYVY:
+      case V4L2_PIX_FMT_VYUY:
         if (enc->scratch == NULL)
           {
             return -ENOMEM;
           }
 
-        bk7258_jpeg_deinterleave_uyvy(&planes, src, enc->scratch,
-                                      width, height);
+        bk7258_jpeg_deinterleave(&planes,
+                                 format == V4L2_PIX_FMT_UYVY ?
+                                 &g_uyvy_order : &g_vyuy_order,
+                                 src, enc->scratch, width, height);
         break;
 
       default:
@@ -830,10 +883,29 @@ static int bk7258_jpeg_output_enum_fmt(void *priv,
 
   fmt->pixelformat = g_output_formats[fmt->index];
   fmt->flags       = 0;
-  strlcpy((char *)fmt->description,
-          fmt->pixelformat == V4L2_PIX_FMT_YUV420 ? "YUV 4:2:0 (I420)"
-                                                  : "YUV 4:2:2 (UYVY)",
-          sizeof(fmt->description));
+
+  /* Spell the byte order out: VYUY here means what the camera produces, and
+   * the description is the only place ENUM_FMT can say so.
+   */
+
+  switch (fmt->pixelformat)
+    {
+      case V4L2_PIX_FMT_YUV420:
+        strlcpy((char *)fmt->description, "YUV 4:2:0 (I420)",
+                sizeof(fmt->description));
+        break;
+
+      case V4L2_PIX_FMT_VYUY:
+        strlcpy((char *)fmt->description, "4:2:2 Cr Y1 Cb Y0 (camera)",
+                sizeof(fmt->description));
+        break;
+
+      default:
+        strlcpy((char *)fmt->description, "4:2:2 Cb Y0 Cr Y1 (UYVY)",
+                sizeof(fmt->description));
+        break;
+    }
+
   return 0;
 }
 
@@ -1129,7 +1201,13 @@ static void *bk7258_jpeg_alloc_buf(void *priv, size_t size)
           return NULL;
         }
 
-      addr = bk7258_psram_memalign(32, size);
+      /* Only ever this pool, so free_buf has one answer.  A frame too big
+       * for it fails here, REQBUFS reports ENOMEM, and the caller retries
+       * with one buffer per queue.
+       */
+
+      addr = bk7258_media_pool_alloc(BK7258_JPEG_POOL, 32, size);
+
       if (addr == NULL)
         {
           return NULL;
@@ -1151,7 +1229,7 @@ static void *bk7258_jpeg_alloc_buf(void *priv, size_t size)
     }
 
   printf("bk7258_jpeg: %zu byte pool from %s\n",
-         size, use_psram ? "PSRAM" : "main heap");
+         size, use_psram ? "psram-encode" : "main heap");
 
   return addr;
 }
@@ -1177,7 +1255,7 @@ static void bk7258_jpeg_free_buf(void *priv, void *addr)
 
   if (bk7258_psram_contains(addr, 1))
     {
-      bk7258_psram_free(addr);
+      bk7258_media_pool_free(BK7258_JPEG_POOL, addr);
     }
   else
     {
