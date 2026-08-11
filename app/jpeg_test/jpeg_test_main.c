@@ -32,12 +32,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <setjmp.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <nuttx/video/fb.h>
 #include <sys/videoio.h>
+
+/* jmorecfg.h defines EXTERN for its own use and NuttX headers have already
+ * defined it as something else.
+ */
+
+#undef EXTERN
+#include <jpeglib.h>
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -93,6 +102,21 @@
 
 #define JPEG_TEST_MAX_RESULTS   32
 
+/* `show` defaults to the panel's own size so nothing is scaled: a scaling
+ * step would be one more thing to blame when the picture looks wrong.
+ */
+
+#define JPEG_TEST_SHOW_SIZE     160
+#define JPEG_TEST_FBDEV         "/dev/fb0"
+
+/* Colour bars in the synthetic pattern, and how far from a bar edge a pixel
+ * has to be to count towards the aggregate error.  Chroma is subsampled, so
+ * pixels straddling an edge legitimately differ from the reference.
+ */
+
+#define JPEG_TEST_BARS          8
+#define JPEG_TEST_EDGE_MARGIN   3
+
 struct jpeg_test_buf_s
 {
   void     *addr;
@@ -112,6 +136,17 @@ struct jpeg_test_buf_s
  * bk7258_mailbox_send_wire() returns -EBUSY, which the heartbeat discards
  * without retrying.  Enough console traffic and CP stops seeing heartbeats.
  */
+
+/* Longjmp-based libjpeg error handling.  The default error_exit calls
+ * exit(), which would take the whole program down on a malformed stream
+ * rather than letting this report what happened.
+ */
+
+struct jpeg_test_jerr_s
+{
+  struct jpeg_error_mgr pub;
+  jmp_buf setjmp_buffer;
+};
 
 struct jpeg_test_result_s
 {
@@ -153,16 +188,19 @@ static const char g_b64[] =
 
 static void jpeg_test_usage(void)
 {
-  printf("Usage: jpeg_test <enc|dump|info> [options]\n"
+  printf("Usage: jpeg_test <enc|show|dump|info> [options]\n"
          "  enc   generate a synthetic YUV frame and encode it\n"
+         "  show  encode, decode and display it on " JPEG_TEST_FBDEV "\n"
          "  dump  base64 the last encoded JPEG to the console\n"
          "  info  report the encoder's capabilities and formats\n"
-         "  -w <px>  width, default %d\n"
-         "  -h <px>  height, default %d\n"
+         "  -w <px>  width, default %d (show: %d)\n"
+         "  -h <px>  height, default %d (show: %d)\n"
          "  -q <1..100> quality, default %d\n"
          "  -f <i420|uyvy> input format, default i420\n"
-         "  -n <count>  frames to encode, default %d\n",
-         JPEG_TEST_DEF_WIDTH, JPEG_TEST_DEF_HEIGHT,
+         "  -n <count>  frames to encode, default %d\n"
+         "  -s <0|1>  byte-swap pixels going to the panel, default 0\n",
+         JPEG_TEST_DEF_WIDTH, JPEG_TEST_SHOW_SIZE,
+         JPEG_TEST_DEF_HEIGHT, JPEG_TEST_SHOW_SIZE,
          JPEG_TEST_DEF_QUALITY, JPEG_TEST_DEF_FRAMES);
 }
 
@@ -307,9 +345,33 @@ static int jpeg_test_setup_queue(struct jpeg_test_ctx_s *ctx,
 
   if (ioctl(ctx->fd, VIDIOC_REQBUFS, &req) < 0)
     {
-      printf("jpeg_test: REQBUFS(%s) failed: %d\n",
-             V4L2_TYPE_IS_OUTPUT(type) ? "output" : "capture", errno);
-      return -errno;
+      if (errno != ENOMEM || req.count <= 1)
+        {
+          printf("jpeg_test: REQBUFS(%s) failed: %d\n",
+                 V4L2_TYPE_IS_OUTPUT(type) ? "output" : "capture", errno);
+          return -errno;
+        }
+
+      /* Out of pool memory for the pipelined case.  One buffer per queue
+       * still works, it just cannot overlap the next frame with the
+       * application holding the previous one.
+       */
+
+      printf("jpeg_test: %s pool needs %lu buffers, retrying with 1\n",
+             V4L2_TYPE_IS_OUTPUT(type) ? "output" : "capture",
+             (unsigned long)req.count);
+
+      memset(&req, 0, sizeof(req));
+      req.type   = type;
+      req.memory = V4L2_MEMORY_MMAP;
+      req.count  = 1;
+
+      if (ioctl(ctx->fd, VIDIOC_REQBUFS, &req) < 0)
+        {
+          printf("jpeg_test: REQBUFS(%s) failed even with 1: %d\n",
+                 V4L2_TYPE_IS_OUTPUT(type) ? "output" : "capture", errno);
+          return -errno;
+        }
     }
 
   *count = req.count;
@@ -692,6 +754,624 @@ out:
 }
 
 /****************************************************************************
+ * Name: jpeg_test_pattern_bar_chroma
+ *
+ * Description:
+ *   The Cb/Cr the pattern generators write for a given bar.  Shared with the
+ *   reference builder so the comparison cannot drift from the source.
+ *
+ ****************************************************************************/
+
+static void jpeg_test_pattern_bar_chroma(uint32_t bar, uint8_t *cb,
+                                         uint8_t *cr)
+{
+  static const uint8_t cbtab[JPEG_TEST_BARS] =
+    {
+      128, 16, 166, 54, 202, 90, 240, 128
+    };
+
+  static const uint8_t crtab[JPEG_TEST_BARS] =
+    {
+      128, 146, 16, 34, 222, 240, 110, 128
+    };
+
+  *cb = cbtab[bar];
+  *cr = crtab[bar];
+}
+
+/****************************************************************************
+ * Name: jpeg_test_ycc_to_rgb565
+ *
+ * Description:
+ *   JFIF full-range YCbCr to RGB565.  JPEG is JFIF by definition, so this is
+ *   the conversion the decoder performs; using the same one here keeps the
+ *   difference between them down to compression loss.
+ *
+ ****************************************************************************/
+
+static uint16_t jpeg_test_ycc_to_rgb565(int y, int cb, int cr)
+{
+  int r = y + (1402 * (cr - 128)) / 1000;
+  int g = y - (344 * (cb - 128)) / 1000 - (714 * (cr - 128)) / 1000;
+  int b = y + (1772 * (cb - 128)) / 1000;
+
+  r = r < 0 ? 0 : (r > 255 ? 255 : r);
+  g = g < 0 ? 0 : (g > 255 ? 255 : g);
+  b = b < 0 ? 0 : (b > 255 ? 255 : b);
+
+  return (uint16_t)(((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3));
+}
+
+/****************************************************************************
+ * Name: jpeg_test_reference
+ *
+ * Description:
+ *   Build what the decoded frame should look like, from the definition of
+ *   the test pattern rather than by running the generator again.  With swap
+ *   Cb and Cr are exchanged, which is what a driver that mixes up the chroma
+ *   planes would produce.
+ *
+ ****************************************************************************/
+
+static void jpeg_test_reference(uint16_t *dst, uint32_t w, uint32_t h,
+                               bool swap)
+{
+  uint32_t row;
+  uint32_t col;
+
+  for (row = 0; row < h; row++)
+    {
+      int ramp = 40 + (int)((row * 175) / h);
+
+      for (col = 0; col < w; col++)
+        {
+          uint32_t bar = col * JPEG_TEST_BARS / w;
+          uint8_t cb;
+          uint8_t cr;
+          int y;
+
+          jpeg_test_pattern_bar_chroma(bar, &cb, &cr);
+          y = bar == JPEG_TEST_BARS - 1 ? 16 : ramp;
+
+          dst[(size_t)row * w + col] = swap ?
+            jpeg_test_ycc_to_rgb565(y, cr, cb) :
+            jpeg_test_ycc_to_rgb565(y, cb, cr);
+        }
+    }
+}
+
+/****************************************************************************
+ * Name: jpeg_test_panel_size
+ *
+ * Description:
+ *   What the panel can show.  Asked before decoding so nothing larger is
+ *   ever allocated or scaled down afterwards.
+ *
+ ****************************************************************************/
+
+static int jpeg_test_panel_size(uint32_t *w, uint32_t *h)
+{
+  struct fb_videoinfo_s vinfo;
+  int fd;
+
+  fd = open(JPEG_TEST_FBDEV, O_RDWR);
+  if (fd < 0)
+    {
+      printf("jpeg_test: open %s failed: %d\n", JPEG_TEST_FBDEV, errno);
+      return -errno;
+    }
+
+  if (ioctl(fd, FBIOGET_VIDEOINFO, (uintptr_t)&vinfo) < 0)
+    {
+      printf("jpeg_test: FBIOGET_VIDEOINFO failed: %d\n", errno);
+      close(fd);
+      return -errno;
+    }
+
+  *w = vinfo.xres;
+  *h = vinfo.yres;
+  close(fd);
+  return 0;
+}
+
+/****************************************************************************
+ * Name: jpeg_test_jerr_exit
+ ****************************************************************************/
+
+static void jpeg_test_jerr_exit(j_common_ptr cinfo)
+{
+  struct jpeg_test_jerr_s *err = (struct jpeg_test_jerr_s *)cinfo->err;
+  char msg[JMSG_LENGTH_MAX];
+
+  (*cinfo->err->format_message)(cinfo, msg);
+  printf("jpeg_test: libjpeg: %s\n", msg);
+
+  longjmp(err->setjmp_buffer, 1);
+}
+
+/****************************************************************************
+ * Name: jpeg_test_decode
+ *
+ * Description:
+ *   Decode the last encoded frame straight to RGB565, the panel's format.
+ *   Returns a malloc'd buffer of w*h pixels, or NULL.
+ *
+ ****************************************************************************/
+
+static uint16_t *jpeg_test_decode(uint32_t maxw, uint32_t maxh,
+                                  uint32_t *width, uint32_t *height)
+{
+  struct jpeg_decompress_struct dinfo;
+  struct jpeg_test_jerr_s jerr;
+  uint16_t *out = NULL;
+  uint32_t row = 0;
+  unsigned int num;
+
+  if (g_last_jpeg == NULL || g_last_len == 0)
+    {
+      printf("jpeg_test: nothing encoded yet\n");
+      return NULL;
+    }
+
+  memset(&dinfo, 0, sizeof(dinfo));
+  dinfo.err = jpeg_std_error(&jerr.pub);
+  jerr.pub.error_exit = jpeg_test_jerr_exit;
+
+  if (setjmp(jerr.setjmp_buffer))
+    {
+      jpeg_destroy_decompress(&dinfo);
+      free(out);
+      return NULL;
+    }
+
+  jpeg_create_decompress(&dinfo);
+  jpeg_mem_src(&dinfo, g_last_jpeg, (unsigned long)g_last_len);
+
+  if (jpeg_read_header(&dinfo, TRUE) != JPEG_HEADER_OK)
+    {
+      printf("jpeg_test: not a complete JPEG header\n");
+      jpeg_destroy_decompress(&dinfo);
+      return NULL;
+    }
+
+  dinfo.out_color_space = JCS_RGB565;
+
+  /* Largest N/8 reduction that fits.  libjpeg does this inside the IDCT, so
+   * it costs less than decoding full size, and it keeps the buffers down to
+   * what the panel can actually show.
+   */
+
+  for (num = 8; num >= 1; num--)
+    {
+      dinfo.scale_num   = num;
+      dinfo.scale_denom = 8;
+      jpeg_calc_output_dimensions(&dinfo);
+
+      if (dinfo.output_width <= maxw && dinfo.output_height <= maxh)
+        {
+          break;
+        }
+    }
+
+  if (dinfo.output_width > maxw || dinfo.output_height > maxh)
+    {
+      printf("jpeg_test: %lux%lu will not reduce to fit %lux%lu\n",
+             (unsigned long)dinfo.image_width,
+             (unsigned long)dinfo.image_height,
+             (unsigned long)maxw, (unsigned long)maxh);
+      jpeg_destroy_decompress(&dinfo);
+      return NULL;
+    }
+
+  if (num != 8)
+    {
+      printf("jpeg_test: decoding at %u/8 to fit the panel\n", num);
+    }
+
+  if (!jpeg_start_decompress(&dinfo))
+    {
+      printf("jpeg_test: start_decompress refused\n");
+      jpeg_destroy_decompress(&dinfo);
+      return NULL;
+    }
+
+  /* RGB565 reports output_components as 3 but writes two bytes per pixel
+   * (jdcol565.c advances by 2), so the row stride follows the format, not
+   * that field.
+   */
+
+  out = malloc((size_t)dinfo.output_width * dinfo.output_height * 2);
+  if (out == NULL)
+    {
+      printf("jpeg_test: no memory for %lux%lu RGB565\n",
+             (unsigned long)dinfo.output_width,
+             (unsigned long)dinfo.output_height);
+      jpeg_abort_decompress(&dinfo);
+      jpeg_destroy_decompress(&dinfo);
+      return NULL;
+    }
+
+  while (dinfo.output_scanline < dinfo.output_height)
+    {
+      JSAMPROW rows[1];
+
+      rows[0] = (JSAMPROW)(out + (size_t)row * dinfo.output_width);
+
+      if (jpeg_read_scanlines(&dinfo, rows, 1) != 1)
+        {
+          printf("jpeg_test: decode stalled at row %lu\n",
+                 (unsigned long)row);
+          free(out);
+          jpeg_abort_decompress(&dinfo);
+          jpeg_destroy_decompress(&dinfo);
+          return NULL;
+        }
+
+      row++;
+    }
+
+  *width  = dinfo.output_width;
+  *height = dinfo.output_height;
+
+  jpeg_finish_decompress(&dinfo);
+  jpeg_destroy_decompress(&dinfo);
+
+  return out;
+}
+
+/****************************************************************************
+ * Name: jpeg_test_channel_error
+ *
+ * Description:
+ *   Mean absolute per-channel error between two RGB565 images, in 8-bit
+ *   terms, ignoring pixels close to a bar edge where chroma subsampling
+ *   makes a difference legitimate.
+ *
+ ****************************************************************************/
+
+static void jpeg_test_channel_error(const uint16_t *got,
+                                    const uint16_t *want,
+                                    uint32_t w, uint32_t h,
+                                    uint32_t *er, uint32_t *eg,
+                                    uint32_t *eb)
+{
+  uint32_t sumr = 0;
+  uint32_t sumg = 0;
+  uint32_t sumb = 0;
+  uint32_t n = 0;
+  uint32_t row;
+  uint32_t col;
+
+  for (row = 0; row < h; row++)
+    {
+      for (col = 0; col < w; col++)
+        {
+          uint32_t barw = w / JPEG_TEST_BARS;
+          uint32_t off = barw ? col % barw : 0;
+          size_t i = (size_t)row * w + col;
+          int d;
+
+          if (barw > 2 * JPEG_TEST_EDGE_MARGIN &&
+              (off < JPEG_TEST_EDGE_MARGIN ||
+               off >= barw - JPEG_TEST_EDGE_MARGIN))
+            {
+              continue;
+            }
+
+          d = (int)((got[i] >> 11) & 0x1f) - (int)((want[i] >> 11) & 0x1f);
+          sumr += (uint32_t)(d < 0 ? -d : d) * 8;
+
+          d = (int)((got[i] >> 5) & 0x3f) - (int)((want[i] >> 5) & 0x3f);
+          sumg += (uint32_t)(d < 0 ? -d : d) * 4;
+
+          d = (int)(got[i] & 0x1f) - (int)(want[i] & 0x1f);
+          sumb += (uint32_t)(d < 0 ? -d : d) * 8;
+
+          n++;
+        }
+    }
+
+  if (n == 0)
+    {
+      n = 1;
+    }
+
+  *er = sumr / n;
+  *eg = sumg / n;
+  *eb = sumb / n;
+}
+
+/****************************************************************************
+ * Name: jpeg_test_unpack565
+ *
+ * Description:
+ *   RGB565 back to 8-bit channels, so differences can be read in the units
+ *   the source was written in.
+ *
+ ****************************************************************************/
+
+static void jpeg_test_unpack565(uint16_t px, int *r, int *g, int *b)
+{
+  *r = (int)((px >> 11) & 0x1f) * 8;
+  *g = (int)((px >> 5) & 0x3f) * 4;
+  *b = (int)(px & 0x1f) * 8;
+}
+
+/****************************************************************************
+ * Name: jpeg_test_verify
+ *
+ * Description:
+ *   Decide whether the encoder produced the picture it was given, without
+ *   involving the panel.  The decoded frame is scored against the pattern's
+ *   definition and against the same reference with Cb and Cr exchanged;
+ *   whichever scores lower is the chroma order that actually came out, so no
+ *   absolute threshold has to be chosen.
+ *
+ ****************************************************************************/
+
+static int jpeg_test_verify(const uint16_t *got, uint32_t w, uint32_t h)
+{
+  uint16_t *want;
+  uint16_t *swapped;
+  uint32_t nr;
+  uint32_t ng;
+  uint32_t nb;
+  uint32_t sr;
+  uint32_t sg;
+  uint32_t sb;
+  uint32_t normal;
+  uint32_t swap;
+  uint32_t bar;
+  int ret = 0;
+
+  want = malloc((size_t)w * h * 2);
+  swapped = malloc((size_t)w * h * 2);
+
+  if (want == NULL || swapped == NULL)
+    {
+      printf("jpeg_test: no memory for reference images\n");
+      free(want);
+      free(swapped);
+      return -ENOMEM;
+    }
+
+  jpeg_test_reference(want, w, h, false);
+  jpeg_test_reference(swapped, w, h, true);
+
+  jpeg_test_channel_error(got, want, w, h, &nr, &ng, &nb);
+  jpeg_test_channel_error(got, swapped, w, h, &sr, &sg, &sb);
+
+  normal = nr + ng + nb;
+  swap   = sr + sg + sb;
+
+  printf("jpeg_test: mean |error| vs reference   R%lu G%lu B%lu (sum %lu)\n",
+         (unsigned long)nr, (unsigned long)ng, (unsigned long)nb,
+         (unsigned long)normal);
+  printf("jpeg_test: mean |error| vs Cb/Cr swap  R%lu G%lu B%lu (sum %lu)\n",
+         (unsigned long)sr, (unsigned long)sg, (unsigned long)sb,
+         (unsigned long)swap);
+
+  /* Bar centres are far from every subsampling edge, so a mismatch here is
+   * the encoder's and not the format's.
+   */
+
+  printf("jpeg_test: bar  expected RGB   decoded RGB   worst channel\n");
+
+  for (bar = 0; bar < JPEG_TEST_BARS; bar++)
+    {
+      uint32_t col = (bar * w) / JPEG_TEST_BARS + w / (2 * JPEG_TEST_BARS);
+      size_t i = (size_t)(h / 2) * w + col;
+      int wr;
+      int wg;
+      int wb;
+      int gr;
+      int gg;
+      int gb;
+      int worst;
+      int d;
+
+      jpeg_test_unpack565(want[i], &wr, &wg, &wb);
+      jpeg_test_unpack565(got[i], &gr, &gg, &gb);
+
+      worst = gr - wr;
+      worst = worst < 0 ? -worst : worst;
+      d = gg - wg;
+      d = d < 0 ? -d : d;
+      worst = d > worst ? d : worst;
+      d = gb - wb;
+      d = d < 0 ? -d : d;
+      worst = d > worst ? d : worst;
+
+      printf("jpeg_test:  %lu   %3d,%3d,%3d   %3d,%3d,%3d   %d%s\n",
+             (unsigned long)bar, wr, wg, wb, gr, gg, gb, worst,
+             worst > 40 ? "  <-- wrong" : "");
+    }
+
+  if (swap < normal)
+    {
+      printf("jpeg_test: VERDICT chroma planes are exchanged -- the swapped "
+             "reference fits better\n");
+      ret = -EIO;
+    }
+  else if (normal > 40)
+    {
+      printf("jpeg_test: VERDICT chroma order is right but the error is "
+             "large; check luma stride and sampling factors\n");
+      ret = -EIO;
+    }
+  else
+    {
+      printf("jpeg_test: VERDICT picture matches the source, chroma order "
+             "and strides are correct\n");
+    }
+
+  free(want);
+  free(swapped);
+  return ret;
+}
+
+/****************************************************************************
+ * Name: jpeg_test_display
+ *
+ * Description:
+ *   Centre an RGB565 image on the panel and push it.  Byte swapping is
+ *   selectable because the panel's wire order is a property of the QSPI
+ *   burst, not of this image.
+ *
+ ****************************************************************************/
+
+static int jpeg_test_display(const uint16_t *px, uint32_t w, uint32_t h,
+                             bool bswap)
+{
+  struct fb_videoinfo_s vinfo;
+  struct fb_planeinfo_s pinfo;
+  struct fb_area_s area;
+  uint16_t *fbmem;
+  uint32_t xoff;
+  uint32_t yoff;
+  uint32_t row;
+  int ret = 0;
+  int fd;
+
+  fd = open(JPEG_TEST_FBDEV, O_RDWR);
+  if (fd < 0)
+    {
+      printf("jpeg_test: open %s failed: %d\n", JPEG_TEST_FBDEV, errno);
+      return -errno;
+    }
+
+  if (ioctl(fd, FBIOGET_VIDEOINFO, (uintptr_t)&vinfo) < 0 ||
+      ioctl(fd, FBIOGET_PLANEINFO, (uintptr_t)&pinfo) < 0)
+    {
+      printf("jpeg_test: framebuffer query failed: %d\n", errno);
+      close(fd);
+      return -errno;
+    }
+
+  if (vinfo.fmt != FB_FMT_RGB16_565)
+    {
+      printf("jpeg_test: panel is not RGB565 (fmt %u)\n",
+             (unsigned int)vinfo.fmt);
+      close(fd);
+      return -ENOTSUP;
+    }
+
+  if (w > vinfo.xres || h > vinfo.yres)
+    {
+      printf("jpeg_test: %lux%lu does not fit the %ux%u panel; use -w/-h\n",
+             (unsigned long)w, (unsigned long)h,
+             (unsigned int)vinfo.xres, (unsigned int)vinfo.yres);
+      close(fd);
+      return -EINVAL;
+    }
+
+  fbmem = mmap(NULL, pinfo.fblen, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (fbmem == MAP_FAILED)
+    {
+      printf("jpeg_test: framebuffer mmap failed: %d\n", errno);
+      close(fd);
+      return -errno;
+    }
+
+  memset(fbmem, 0, pinfo.fblen);
+
+  xoff = (vinfo.xres - w) / 2;
+  yoff = (vinfo.yres - h) / 2;
+
+  for (row = 0; row < h; row++)
+    {
+      uint16_t *drow = fbmem + (size_t)(yoff + row) *
+                       (pinfo.stride / 2) + xoff;
+      const uint16_t *srow = px + (size_t)row * w;
+      uint32_t col;
+
+      for (col = 0; col < w; col++)
+        {
+          uint16_t c = srow[col];
+
+          drow[col] = bswap ? (uint16_t)((c >> 8) | (c << 8)) : c;
+        }
+    }
+
+  area.x = 0;
+  area.y = 0;
+  area.w = (fb_coord_t)vinfo.xres;
+  area.h = (fb_coord_t)vinfo.yres;
+
+  if (ioctl(fd, FBIO_UPDATE, (uintptr_t)&area) < 0)
+    {
+      printf("jpeg_test: FBIO_UPDATE failed: %d\n", errno);
+      ret = -errno;
+    }
+  else
+    {
+      printf("jpeg_test: %lux%lu shown at (%lu,%lu) on a %ux%u panel%s\n",
+             (unsigned long)w, (unsigned long)h, (unsigned long)xoff,
+             (unsigned long)yoff, (unsigned int)vinfo.xres,
+             (unsigned int)vinfo.yres, bswap ? ", byte-swapped" : "");
+    }
+
+  munmap(fbmem, pinfo.fblen);
+  close(fd);
+  return ret;
+}
+
+/****************************************************************************
+ * Name: jpeg_test_show
+ *
+ * Description:
+ *   Encode a frame, decode it back and put it on the panel, reporting
+ *   whether the round trip preserved the picture.
+ *
+ ****************************************************************************/
+
+static int jpeg_test_show(uint32_t width, uint32_t height, int quality,
+                          uint32_t pixfmt, bool bswap)
+{
+  uint16_t *px;
+  uint32_t panelw = 0;
+  uint32_t panelh = 0;
+  uint32_t dw = 0;
+  uint32_t dh = 0;
+  int ret;
+
+  ret = jpeg_test_panel_size(&panelw, &panelh);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = jpeg_test_encode(width, height, quality, pixfmt, 1);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  px = jpeg_test_decode(panelw, panelh, &dw, &dh);
+  if (px == NULL)
+    {
+      return -EIO;
+    }
+
+  printf("jpeg_test: decoded %lux%lu from %zu bytes\n",
+         (unsigned long)dw, (unsigned long)dh, g_last_len);
+
+  ret = jpeg_test_verify(px, dw, dh);
+
+  /* Show it either way: a wrong picture on the glass is worth seeing, and
+   * the verdict above already says whether to trust it.
+   */
+
+  if (jpeg_test_display(px, dw, dh, bswap) < 0 && ret == 0)
+    {
+      ret = -EIO;
+    }
+
+  free(px);
+  return ret;
+}
+
+/****************************************************************************
  * Name: jpeg_test_dump
  *
  * Description:
@@ -832,11 +1512,13 @@ static int jpeg_test_info(void)
 
 int main(int argc, char *argv[])
 {
-  uint32_t width = JPEG_TEST_DEF_WIDTH;
-  uint32_t height = JPEG_TEST_DEF_HEIGHT;
+  bool show = argc > 1 && strcmp(argv[1], "show") == 0;
+  uint32_t width = show ? JPEG_TEST_SHOW_SIZE : JPEG_TEST_DEF_WIDTH;
+  uint32_t height = show ? JPEG_TEST_SHOW_SIZE : JPEG_TEST_DEF_HEIGHT;
   uint32_t pixfmt = V4L2_PIX_FMT_YUV420;
   int quality = JPEG_TEST_DEF_QUALITY;
   int nframes = JPEG_TEST_DEF_FRAMES;
+  bool bswap = false;
   int i;
 
   if (argc < 2)
@@ -865,6 +1547,10 @@ int main(int argc, char *argv[])
         {
           nframes = (int)value;
         }
+      else if (strcmp(argv[i], "-s") == 0)
+        {
+          bswap = value != 0;
+        }
       else if (strcmp(argv[i], "-f") == 0)
         {
           if (strcmp(argv[i + 1], "uyvy") == 0)
@@ -886,6 +1572,12 @@ int main(int argc, char *argv[])
           jpeg_test_usage();
           return EXIT_FAILURE;
         }
+    }
+
+  if (show)
+    {
+      return jpeg_test_show(width, height, quality, pixfmt, bswap) < 0 ?
+             EXIT_FAILURE : EXIT_SUCCESS;
     }
 
   if (strcmp(argv[1], "enc") == 0)
