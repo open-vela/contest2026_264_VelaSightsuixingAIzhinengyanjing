@@ -8,9 +8,9 @@ config LVX_USE_DEMO_CONTEST2026_264_CAMERA_PREVIEW
 	default n
 	depends on VIDEO_FB
 	---help---
-		Live preview command: captures 640x480 UYVY from /dev/video0,
-		centre-crops to a square, scales to the panel size and pushes
-		RGB565 frames to /dev/fb0.
+		Live preview command: captures 640x480 packed 4:2:2 from
+		/dev/video0, centre-crops to a square, scales to the panel size
+		and pushes RGB565 frames to /dev/fb0.
 
 		Samples the source directly into the framebuffer, so it needs no
 		intermediate buffer -- which is what makes it usable on a board

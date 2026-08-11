@@ -385,12 +385,22 @@ void bk7258_yuv_buf_configure(uint16_t width, uint16_t height)
             YUV_BUF_CTRL_BPS_CIS | YUV_BUF_CTRL_MEMREV |
             YUV_BUF_CTRL_H264_MODE);
   /* yuv_fmt_sel describes the byte order the SENSOR puts on the DVP
-   * bus, which GC2145's register tables define as YUYV
-   * (dvp_gc2145.c's .fmt = PIXEL_FMT_YUYV, i.e. YUV_FORMAT_YUYV = 0).
-   * It is not the order this module writes to memory: a captured frame
-   * measured on hardware comes out as U Y V Y, which is why the V4L2
-   * layer advertises V4L2_PIX_FMT_UYVY (see
-   * bk7258_camera_imgsensor.c's g_bk7258_gc2145_fmtdescs).
+   * bus, which GC2145's register tables define as Y Cb Y Cr
+   * (dvp_gc2145.c's .fmt = PIXEL_FMT_YUYV, i.e. YUV_FORMAT_YUYV = 0,
+   * from register 0x84 = 0x02).
+   * It is NOT the order this module writes to memory: the frame buffer
+   * comes out with those four bytes reversed, Cr Y1 Cb Y0.  The V4L2
+   * layer still advertises V4L2_PIX_FMT_UYVY because no fourcc names that
+   * layout and the imgsensor/imgdata layers define only UYVY and YUYV.
+   * See bk7258_camera_imgsensor.c's g_bk7258_gc2145_fmtdescs for the three
+   * measurements behind this (a panel photograph for which bytes are luma,
+   * a smoothness test for the reversal, the bus order for which chroma byte
+   * is Cb -- the hexdump alone is consistent with several readings).
+   *
+   * If the memory order ever has to be normalised to a standard fourcc, the
+   * fields to try are ctrl.bus_dat_byte_reve (bit18) and ctrl.memrev
+   * (bit14); both are left at 0 here, as the vendor driver does, and
+   * neither has been tested on this board.
    */
 
   ctrl |= (YUV_BUF_FMT_YUYV << YUV_BUF_CTRL_YUV_FMT_SEL_SHIFT);

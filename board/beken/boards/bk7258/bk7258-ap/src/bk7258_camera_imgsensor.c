@@ -809,15 +809,74 @@ static const struct imgsensor_ops_s g_bk7258_gc2145_ops =
  * switching).
  */
 
-/* UYVY, not YUYV: the byte order YUV_BUF writes into the frame buffer is
- * U Y V Y.  Measured on hardware by dumping a captured frame -- read as
- * UYVY the chroma planes sit at ~128 with luma carrying the image's
- * dynamic range (18..153 over 120 rows), while read as YUYV the "luma"
- * is pinned near 128 and both chroma channels swing together, which no
- * real scene produces.  Note ctrl.yuv_fmt_sel stays at YUV_FORMAT_YUYV
- * (0) in bk7258_yuv_buf.c: that field describes the order the sensor
- * puts on the DVP bus, which is a separate thing from the order the
- * module writes to memory.
+/* V4L2_PIX_FMT_UYVY is a label of convenience, not the exact layout.
+ *
+ * What YUV_BUF actually writes into the frame buffer is the four bus bytes
+ * of each pixel pair stored *backwards*:
+ *
+ *   DVP bus:  Y0 Cb Y1 Cr      (GC2145 register 0x84 = 0x02, "YCbYCr")
+ *   memory:   Cr Y1 Cb Y0
+ *
+ * so byte0 is Cr, byte2 is Cb, byte3 is the left pixel's luma and byte1 the
+ * right pixel's.  Three separate measurements pin that down; keep them
+ * distinct, because the first one alone was mistaken for all three:
+ *
+ *  1. Luma is at bytes 1 and 3.  Decoding with luma at bytes 0/2 was run on
+ *     hardware and photographed: geometrically correct, clearly
+ *     recognisable, but every pixel saturated green or magenta -- the
+ *     arithmetic signature of feeding chroma into the luma term (derivation
+ *     in camera_preview_main.c's preview_convert()).  A captured frame
+ *     agrees: bytes 1/3 have sd 39 and span 18..153, bytes 0/2 have sd 6.2
+ *     and 2.3 about 128.
+ *
+ *  2. The two luma samples are stored in reverse column order.  Natural
+ *     images are equally smooth across every pixel boundary, so mean |dY|
+ *     within a group must equal mean |dY| across the group boundary.  On a
+ *     captured frame it was 1.752 within versus 3.787 across (2.16x);
+ *     un-swapping the two luma bytes gives 1.752 versus 1.760, matching the
+ *     1.621 the same measurement gives vertically, where no byte order is
+ *     involved.  The asymmetry is what a pair read out backwards looks like:
+ *     the "across" difference then spans three columns instead of one.
+ *
+ *  3. Therefore byte0 is Cr.  Given the bus order above (Beken's own table
+ *     comments 0x84 = 0x02 as "yuyv"; Zephyr's GC2145 driver maps
+ *     VIDEO_PIX_FMT_YUYV to GC2145_REG_OUTPUT_FMT_YCBYCR = 0x02), a group
+ *     whose chroma sits at bytes 0/2 *and* whose luma is reversed is exactly
+ *     the bus bytes reversed, which puts Cr first.
+ *
+ * Confirmed on the glass, 2026-08-11, by running all three decodes: the order
+ * above gives correct colour, textbook UYVY gives cyan skin tones with
+ * otherwise correct structure and brightness (the Cb/Cr swap), and textbook
+ * YUYV gives fluorescent green/magenta (chroma in the luma term).  Each
+ * observation falsifies a different candidate, which is why all three were
+ * run rather than just the default.
+ *
+ * The fourcc stays UYVY because the imgsensor and imgdata layers define only
+ * UYVY and YUYV (include/nuttx/video/imgsensor.h): VYUY, the closest true
+ * name, has no IMGSENSOR_PIX_FMT_* and would need changes in
+ * drivers/video/v4l2_cap.c, i.e. outside this board's adaptation.  UYVY is
+ * read as "packed 4:2:2, chroma byte first" and the exact order lives here
+ * and in the application's decoder.
+ *
+ * Two traps to avoid repeating:
+ *
+ *  1. A command recorded in a document is not a measurement.  An earlier
+ *     round flipped this to YUYV citing `ffmpeg -pix_fmt yuyv422` from
+ *     docs/main/2026-08-10-capture-success-and-prior-doc-limitations.md
+ *     §4.1, while §4.2 of that same document lists "YUYV 字节序" as NOT yet
+ *     verified.
+ *  2. This descriptor and the application must agree or VIDIOC_S_FMT fails,
+ *     but agreement is not correctness.  Both said UYVY, then both YUYV,
+ *     then both UYVY, and V4L2 accepted every time; meanwhile Cb and Cr
+ *     stayed swapped, which shows as slightly wrong hues rather than an
+ *     obviously broken picture.  The only authority is the hardware.
+ *
+ * Note ctrl.yuv_fmt_sel stays at YUV_FORMAT_YUYV (0) in bk7258_yuv_buf.c:
+ * that field describes the order the sensor puts on the DVP bus, which is a
+ * separate thing from the order the module writes to memory.  If the memory
+ * order itself ever needs to be normalised, the candidates are the module's
+ * ctrl.bus_dat_byte_reve (bit18) and ctrl.memrev (bit14) -- untested here,
+ * and testable only on hardware.
  */
 
 static const struct v4l2_fmtdesc g_bk7258_gc2145_fmtdescs[] =
@@ -833,7 +892,7 @@ static const struct v4l2_frmsizeenum g_bk7258_gc2145_frmsizes[] =
 {
   {
     .index = 0,
-    .pixel_format = V4L2_PIX_FMT_YUYV,
+    .pixel_format = V4L2_PIX_FMT_UYVY,
     .type = V4L2_FRMSIZE_TYPE_DISCRETE,
     .discrete =
       {
