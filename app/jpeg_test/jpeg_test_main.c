@@ -108,6 +108,16 @@
 
 #define JPEG_TEST_SHOW_SIZE     160
 #define JPEG_TEST_FBDEV         "/dev/fb0"
+#define JPEG_TEST_CAMDEV        "/dev/video0"
+
+/* What the camera delivers.  Fixed: it enumerates exactly one frame size. */
+
+#define JPEG_TEST_CAM_WIDTH     640
+#define JPEG_TEST_CAM_HEIGHT    480
+
+/* A frame at 57 fps arrives in under 20 ms; this is only a backstop. */
+
+#define JPEG_TEST_CAM_TIMEOUT   2000
 
 /* Colour bars in the synthetic pattern, and how far from a bar edge a pixel
  * has to be to count towards the aggregate error.  Chroma is subsampled, so
@@ -148,6 +158,17 @@ struct jpeg_test_jerr_s
   jmp_buf setjmp_buffer;
 };
 
+/* A capture held open.  The frame stays mapped while the encoder copies out
+ * of it, which is why this is a handle rather than a returned buffer.
+ */
+
+struct jpeg_test_capture_s
+{
+  int       fd;
+  uint8_t  *frame;
+  size_t    length;
+};
+
 struct jpeg_test_result_s
 {
   uint32_t bytes;
@@ -183,22 +204,41 @@ static const char g_b64[] =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /****************************************************************************
+ * Private Function Prototypes
+ ****************************************************************************/
+
+/* Used ahead of their definitions: the pattern generators share the bar
+ * table, and the camera path reuses the display and decode steps.
+ */
+
+static void jpeg_test_pattern_bar_chroma(uint32_t bar, uint8_t *cb,
+                                         uint8_t *cr);
+static int jpeg_test_panel_size(uint32_t *w, uint32_t *h);
+static uint16_t *jpeg_test_decode(uint32_t maxw, uint32_t maxh,
+                                  uint32_t *width, uint32_t *height);
+static int jpeg_test_display(const uint16_t *px, uint32_t w, uint32_t h,
+                             bool bswap);
+
+/****************************************************************************
  * Private Functions
  ****************************************************************************/
 
 static void jpeg_test_usage(void)
 {
-  printf("Usage: jpeg_test <enc|show|dump|info> [options]\n"
+  printf("Usage: jpeg_test <enc|show|cam|dump|info> [options]\n"
          "  enc   generate a synthetic YUV frame and encode it\n"
          "  show  encode, decode and display it on " JPEG_TEST_FBDEV "\n"
+         "  cam   encode one frame from " JPEG_TEST_CAMDEV "\n"
          "  dump  base64 the last encoded JPEG to the console\n"
          "  info  report the encoder's capabilities and formats\n"
          "  -w <px>  width, default %d (show: %d)\n"
          "  -h <px>  height, default %d (show: %d)\n"
          "  -q <1..100> quality, default %d\n"
-         "  -f <i420|uyvy> input format, default i420\n"
+         "  -f <i420|uyvy|vyuy> input format, default i420\n"
+         "        vyuy is the camera's order, Cr Y1 Cb Y0\n"
          "  -n <count>  frames to encode, default %d\n"
-         "  -s <0|1>  byte-swap pixels going to the panel, default 0\n",
+         "  -s <0|1>  byte-swap pixels going to the panel, default 0\n"
+         "  -d <0|1>  cam: display the result, default 1\n",
          JPEG_TEST_DEF_WIDTH, JPEG_TEST_SHOW_SIZE,
          JPEG_TEST_DEF_HEIGHT, JPEG_TEST_SHOW_SIZE,
          JPEG_TEST_DEF_QUALITY, JPEG_TEST_DEF_FRAMES);
@@ -321,6 +361,45 @@ static void jpeg_test_fill_uyvy(uint8_t *dst, uint32_t w, uint32_t h)
 }
 
 /****************************************************************************
+ * Name: jpeg_test_fill_vyuy
+ *
+ * Description:
+ *   The same picture again, in the byte order the camera actually writes:
+ *   Cr Y1 Cb Y0, the four bus bytes of each pair reversed.  Note which luma
+ *   goes where -- the pair's even column is the *last* byte.
+ *
+ *   Having this lets the VYUY path be checked before a camera is involved.
+ *
+ ****************************************************************************/
+
+static void jpeg_test_fill_vyuy(uint8_t *dst, uint32_t w, uint32_t h)
+{
+  uint32_t row;
+  uint32_t col;
+
+  for (row = 0; row < h; row++)
+    {
+      uint8_t *p = dst + (size_t)row * w * 2;
+      uint8_t ramp = 40 + (uint8_t)((row * 175) / h);
+
+      for (col = 0; col + 1 < w; col += 2)
+        {
+          uint32_t bar = col * JPEG_TEST_BARS / w;
+          uint8_t luma = bar == JPEG_TEST_BARS - 1 ? 16 : ramp;
+          uint8_t cb;
+          uint8_t cr;
+
+          jpeg_test_pattern_bar_chroma(bar, &cb, &cr);
+
+          *p++ = cr;
+          *p++ = luma;
+          *p++ = cb;
+          *p++ = luma;
+        }
+    }
+}
+
+/****************************************************************************
  * Name: jpeg_test_setup_queue
  *
  * Description:
@@ -333,13 +412,13 @@ static void jpeg_test_fill_uyvy(uint8_t *dst, uint32_t w, uint32_t h)
 static int jpeg_test_setup_queue(struct jpeg_test_ctx_s *ctx,
                                  enum v4l2_buf_type type,
                                  struct jpeg_test_buf_s *bufs,
-                                 int *count)
+                                 int *count, int want)
 {
   struct v4l2_requestbuffers req;
   int i;
 
   memset(&req, 0, sizeof(req));
-  req.count  = JPEG_TEST_NBUFFERS;
+  req.count  = (uint32_t)want;
   req.memory = V4L2_MEMORY_MMAP;
   req.type   = type;
 
@@ -419,7 +498,8 @@ static int jpeg_test_setup_queue(struct jpeg_test_ctx_s *ctx,
  ****************************************************************************/
 
 static int jpeg_test_encode(uint32_t width, uint32_t height, int quality,
-                            uint32_t pixfmt, int nframes)
+                            uint32_t pixfmt, int nframes,
+                            const uint8_t *source)
 {
   struct jpeg_test_ctx_s ctx;
   struct v4l2_format fmt;
@@ -430,6 +510,7 @@ static int jpeg_test_encode(uint32_t width, uint32_t height, int quality,
   uint32_t timeout_ms = JPEG_TEST_TIMEOUT_FLOOR +
                         (width * height * JPEG_TEST_US_PER_PIXEL) / 1000;
   size_t rawsize;
+  int want;
   int recorded = 0;
   int type;
   int frame;
@@ -508,15 +589,22 @@ static int jpeg_test_encode(uint32_t width, uint32_t height, int quality,
       printf("jpeg_test: quality request rejected: %d\n", errno);
     }
 
+  /* Only what the run can use: a second buffer per queue overlaps the next
+   * frame with the previous one, which a single-frame run never does, and at
+   * 640x480 asking for it leaves the JPEG pool with nothing.
+   */
+
+  want = nframes > 1 ? JPEG_TEST_NBUFFERS : 1;
+
   ret = jpeg_test_setup_queue(&ctx, V4L2_BUF_TYPE_VIDEO_OUTPUT,
-                              ctx.out, &ctx.nout);
+                              ctx.out, &ctx.nout, want);
   if (ret < 0)
     {
       goto out;
     }
 
   ret = jpeg_test_setup_queue(&ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-                              ctx.cap, &ctx.ncap);
+                              ctx.cap, &ctx.ncap, want);
   if (ret < 0)
     {
       goto out;
@@ -548,9 +636,17 @@ static int jpeg_test_encode(uint32_t width, uint32_t height, int quality,
       uint64_t waited;
       int slot = frame % ctx.nout;
 
-      if (pixfmt == V4L2_PIX_FMT_UYVY)
+      if (source != NULL)
+        {
+          memcpy(ctx.out[slot].addr, source, rawsize);
+        }
+      else if (pixfmt == V4L2_PIX_FMT_UYVY)
         {
           jpeg_test_fill_uyvy(ctx.out[slot].addr, width, height);
+        }
+      else if (pixfmt == V4L2_PIX_FMT_VYUY)
+        {
+          jpeg_test_fill_vyuy(ctx.out[slot].addr, width, height);
         }
       else
         {
@@ -838,6 +934,344 @@ static void jpeg_test_reference(uint16_t *dst, uint32_t w, uint32_t h,
             jpeg_test_ycc_to_rgb565(y, cb, cr);
         }
     }
+}
+
+/****************************************************************************
+ * Name: jpeg_test_capture
+ *
+ * Description:
+ *   Grab one frame from the camera into a malloc'd buffer the caller owns.
+ *
+ *   The frame is copied out rather than handed over mapped, so the camera
+ *   can be closed before the encoder allocates: they draw on different PSRAM
+ *   pools, but holding a 614 KB capture buffer open for no reason is still
+ *   worth avoiding.
+ *
+ ****************************************************************************/
+
+static int jpeg_test_capture(struct jpeg_test_capture_s *cap,
+                             uint32_t *width, uint32_t *height)
+{
+  struct v4l2_requestbuffers req;
+  struct v4l2_buffer buf;
+  struct v4l2_format fmt;
+  uint8_t *mapped = NULL;
+  uint32_t offset = 0;
+  size_t length = 0;
+  uint32_t waited;
+  int type;
+  int fd;
+
+  memset(cap, 0, sizeof(*cap));
+  cap->fd = -1;
+
+  fd = open(JPEG_TEST_CAMDEV, O_RDWR);
+  if (fd < 0)
+    {
+      printf("jpeg_test: open %s failed: %d\n", JPEG_TEST_CAMDEV, errno);
+      return -errno;
+    }
+
+  memset(&fmt, 0, sizeof(fmt));
+  fmt.type                 = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  fmt.fmt.pix.width        = JPEG_TEST_CAM_WIDTH;
+  fmt.fmt.pix.height       = JPEG_TEST_CAM_HEIGHT;
+
+  /* The capture side advertises UYVY, which is the tag rather than the
+   * layout; asking for anything else would simply be refused.
+   */
+
+  fmt.fmt.pix.pixelformat  = V4L2_PIX_FMT_UYVY;
+  fmt.fmt.pix.field        = V4L2_FIELD_ANY;
+
+  if (ioctl(fd, VIDIOC_S_FMT, (uintptr_t)&fmt) < 0)
+    {
+      printf("jpeg_test: camera S_FMT failed: %d\n", errno);
+      close(fd);
+      return -errno;
+    }
+
+  memset(&req, 0, sizeof(req));
+  req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  req.memory = V4L2_MEMORY_MMAP;
+  req.count  = 1;
+
+  if (ioctl(fd, VIDIOC_REQBUFS, (uintptr_t)&req) < 0)
+    {
+      printf("jpeg_test: camera REQBUFS failed: %d\n", errno);
+      close(fd);
+      return -errno;
+    }
+
+  memset(&buf, 0, sizeof(buf));
+  buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  buf.memory = V4L2_MEMORY_MMAP;
+  buf.index  = 0;
+
+  if (ioctl(fd, VIDIOC_QUERYBUF, (uintptr_t)&buf) < 0)
+    {
+      printf("jpeg_test: camera QUERYBUF failed: %d\n", errno);
+      close(fd);
+      return -errno;
+    }
+
+  length = buf.length;
+  offset = buf.m.offset;
+  mapped = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+                offset);
+
+  if (mapped == MAP_FAILED)
+    {
+      printf("jpeg_test: camera mmap failed: %d\n", errno);
+      close(fd);
+      return -errno;
+    }
+
+  if (ioctl(fd, VIDIOC_QBUF, (uintptr_t)&buf) < 0)
+    {
+      printf("jpeg_test: camera QBUF failed: %d\n", errno);
+      goto unmap;
+    }
+
+  type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  if (ioctl(fd, VIDIOC_STREAMON, (uintptr_t)&type) < 0)
+    {
+      printf("jpeg_test: camera STREAMON failed: %d\n", errno);
+      goto unmap;
+    }
+
+  for (waited = 0; waited < JPEG_TEST_CAM_TIMEOUT;
+       waited += JPEG_TEST_POLL_MS)
+    {
+      memset(&buf, 0, sizeof(buf));
+      buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      buf.memory = V4L2_MEMORY_MMAP;
+
+      if (ioctl(fd, VIDIOC_DQBUF, (uintptr_t)&buf) == 0)
+        {
+          break;
+        }
+
+      if (errno != EAGAIN)
+        {
+          printf("jpeg_test: camera DQBUF failed: %d\n", errno);
+          goto streamoff;
+        }
+
+      usleep(JPEG_TEST_POLL_MS * 1000);
+    }
+
+  if (waited >= JPEG_TEST_CAM_TIMEOUT)
+    {
+      printf("jpeg_test: no frame from the camera in %d ms\n",
+             JPEG_TEST_CAM_TIMEOUT);
+      goto streamoff;
+    }
+
+  printf("jpeg_test: captured %dx%d, %zu bytes (%lu reported used)\n",
+         JPEG_TEST_CAM_WIDTH, JPEG_TEST_CAM_HEIGHT, length,
+         (unsigned long)buf.bytesused);
+
+  /* Left streaming and mapped on purpose: the encoder copies out of this
+   * buffer, and staging it anywhere else needs memory the main heap has not
+   * got.
+   */
+
+  cap->fd     = fd;
+  cap->frame  = mapped;
+  cap->length = length;
+
+  *width  = JPEG_TEST_CAM_WIDTH;
+  *height = JPEG_TEST_CAM_HEIGHT;
+
+  return 0;
+
+streamoff:
+  type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  ioctl(fd, VIDIOC_STREAMOFF, (uintptr_t)&type);
+
+unmap:
+  munmap(mapped, length);
+  close(fd);
+  return -EIO;
+}
+
+/****************************************************************************
+ * Name: jpeg_test_capture_release
+ ****************************************************************************/
+
+static void jpeg_test_capture_release(struct jpeg_test_capture_s *cap)
+{
+  int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+  if (cap->fd < 0)
+    {
+      return;
+    }
+
+  ioctl(cap->fd, VIDIOC_STREAMOFF, (uintptr_t)&type);
+  munmap(cap->frame, cap->length);
+  close(cap->fd);
+
+  cap->fd    = -1;
+  cap->frame = NULL;
+}
+
+/****************************************************************************
+ * Name: jpeg_test_check_order
+ *
+ * Description:
+ *   Confirm which byte of each pair holds which luma, from the frame itself.
+ *
+ *   Reported as two smoothness figures.  Whichever assignment makes the
+ *   within-pair difference match the across-pair difference is the correct
+ *   one; the wrong one roughly doubles the across-pair figure because it
+ *   transposes every adjacent column.
+ *
+ ****************************************************************************/
+
+static void jpeg_test_check_order(const uint8_t *frame, uint32_t w,
+                                  uint32_t h)
+{
+  uint32_t rows = h > 64 ? 64 : h;
+  uint32_t within[2] = {
+    0, 0
+  };
+
+  uint32_t across[2] = {
+    0, 0
+  };
+
+  uint32_t n = 0;
+  uint32_t row;
+  uint32_t col;
+  int which;
+
+  /* Two candidate luma placements: bytes 3 and 1 (the camera's, even column
+   * last) against bytes 1 and 3 (textbook).
+   */
+
+  static const uint8_t y0[2] = {
+    3, 1
+  };
+
+  static const uint8_t y1[2] = {
+    1, 3
+  };
+
+  for (row = 0; row < rows; row++)
+    {
+      const uint8_t *p = frame + (size_t)row * w * 2;
+
+      for (col = 0; col + 3 < w; col += 2)
+        {
+          for (which = 0; which < 2; which++)
+            {
+              int a = p[y0[which]];
+              int b = p[y1[which]];
+              int c = p[4 + y0[which]];
+              int d;
+
+              d = b - a;
+              within[which] += (uint32_t)(d < 0 ? -d : d);
+
+              d = c - b;
+              across[which] += (uint32_t)(d < 0 ? -d : d);
+            }
+
+          n++;
+          p += 4;
+        }
+    }
+
+  if (n == 0)
+    {
+      return;
+    }
+
+  /* Scaled by 100 so the ratio survives integer division. */
+
+  for (which = 0; which < 2; which++)
+    {
+      uint32_t wi = within[which] * 100 / n;
+      uint32_t ac = across[which] * 100 / n;
+
+      printf("jpeg_test: luma %u/%u: within %lu.%02lu across %lu.%02lu%s\n",
+             y0[which], y1[which],
+             (unsigned long)(wi / 100), (unsigned long)(wi % 100),
+             (unsigned long)(ac / 100), (unsigned long)(ac % 100),
+             which == 0 ? "   <- used" : "");
+    }
+
+  printf("jpeg_test: the assignment whose two figures agree is the right "
+         "one\n");
+}
+
+/****************************************************************************
+ * Name: jpeg_test_cam
+ *
+ * Description:
+ *   Capture one frame and encode it, which is the path the image recognition
+ *   work needs.  Optionally show the result.
+ *
+ ****************************************************************************/
+
+static int jpeg_test_cam(int quality, bool display, bool bswap)
+{
+  struct jpeg_test_capture_s cap;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  int ret;
+
+  ret = jpeg_test_capture(&cap, &width, &height);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  jpeg_test_check_order(cap.frame, width, height);
+
+  /* VYUY, not UYVY: see jpeg_test_fill_vyuy() and the encoder's format
+   * description.  This is the whole point of the exercise.
+   */
+
+  ret = jpeg_test_encode(width, height, quality, V4L2_PIX_FMT_VYUY, 1,
+                         cap.frame);
+  jpeg_test_capture_release(&cap);
+
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (display)
+    {
+      uint32_t panelw = 0;
+      uint32_t panelh = 0;
+      uint32_t dw = 0;
+      uint32_t dh = 0;
+      uint16_t *px;
+
+      if (jpeg_test_panel_size(&panelw, &panelh) < 0)
+        {
+          return 0;
+        }
+
+      px = jpeg_test_decode(panelw, panelh, &dw, &dh);
+      if (px == NULL)
+        {
+          return -EIO;
+        }
+
+      /* No verdict here: a camera frame has no reference to compare with.
+       * `show` is where the encoder's correctness is established.
+       */
+
+      ret = jpeg_test_display(px, dw, dh, bswap);
+      free(px);
+    }
+
+  return ret;
 }
 
 /****************************************************************************
@@ -1341,7 +1775,7 @@ static int jpeg_test_show(uint32_t width, uint32_t height, int quality,
       return ret;
     }
 
-  ret = jpeg_test_encode(width, height, quality, pixfmt, 1);
+  ret = jpeg_test_encode(width, height, quality, pixfmt, 1, NULL);
   if (ret < 0)
     {
       return ret;
@@ -1519,6 +1953,7 @@ int main(int argc, char *argv[])
   int quality = JPEG_TEST_DEF_QUALITY;
   int nframes = JPEG_TEST_DEF_FRAMES;
   bool bswap = false;
+  bool display = true;
   int i;
 
   if (argc < 2)
@@ -1551,11 +1986,19 @@ int main(int argc, char *argv[])
         {
           bswap = value != 0;
         }
+      else if (strcmp(argv[i], "-d") == 0)
+        {
+          display = value != 0;
+        }
       else if (strcmp(argv[i], "-f") == 0)
         {
           if (strcmp(argv[i + 1], "uyvy") == 0)
             {
               pixfmt = V4L2_PIX_FMT_UYVY;
+            }
+          else if (strcmp(argv[i + 1], "vyuy") == 0)
+            {
+              pixfmt = V4L2_PIX_FMT_VYUY;
             }
           else if (strcmp(argv[i + 1], "i420") == 0)
             {
@@ -1580,9 +2023,16 @@ int main(int argc, char *argv[])
              EXIT_FAILURE : EXIT_SUCCESS;
     }
 
+  if (strcmp(argv[1], "cam") == 0)
+    {
+      return jpeg_test_cam(quality, display, bswap) < 0 ?
+             EXIT_FAILURE : EXIT_SUCCESS;
+    }
+
   if (strcmp(argv[1], "enc") == 0)
     {
-      return jpeg_test_encode(width, height, quality, pixfmt, nframes) < 0 ?
+      return jpeg_test_encode(width, height, quality, pixfmt, nframes,
+                              NULL) < 0 ?
              EXIT_FAILURE : EXIT_SUCCESS;
     }
   else if (strcmp(argv[1], "dump") == 0)
