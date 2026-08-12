@@ -90,6 +90,7 @@ _Static_assert((BK7258_MB_HEADER_STATE_MASK &
 #define BK7258_MB_CHAN_WIFI_CMD_RX  0x44u
 #define BK7258_MB_CHAN_WIFI_DATA_RX 0x45u
 #define BK7258_MB_CHAN_UART0_RX     0x49u
+#define BK7258_MB_CHAN_SARADC_RX    0x4cu
 
 #define BK7258_MB_UART_DATA         0u
 #define BK7258_MB_UART_STATE        1u
@@ -103,9 +104,24 @@ _Static_assert((BK7258_MB_HEADER_STATE_MASK &
 #define BK7258_CP_RAM_END           0x2809f700u
 #define BK7258_SWAP_BASE            0x2809f800u
 #define BK7258_SWAP_SIZE            0x00000800u
+#define BK7258_IPC_TX_ADDRESS       0x2809f900u
+#define BK7258_IPC_TX_SIZE          0x00000080u
 #define BK7258_MB_UART_RX_ADDRESS   0x2809fc00u
 #define BK7258_MB_UART_TX_ADDRESS   0x2809fd00u
+#define BK7258_MB_SHARED_TX_START   BK7258_IPC_TX_ADDRESS
+#define BK7258_MB_SHARED_TX_SIZE    \
+  (BK7258_MB_UART_TX_ADDRESS + BK7258_MB_UART_CHUNK_SIZE - \
+   BK7258_MB_SHARED_TX_START)
 
+_Static_assert(BK7258_IPC_TX_ADDRESS >= BK7258_SWAP_BASE &&
+               BK7258_IPC_TX_ADDRESS + BK7258_IPC_TX_SIZE <=
+               BK7258_SWAP_BASE + BK7258_SWAP_SIZE,
+               "IPC TX buffer lies outside SWAP");
+_Static_assert((BK7258_IPC_TX_ADDRESS & 31u) == 0,
+               "IPC TX buffer must be cache-line aligned");
+_Static_assert(BK7258_MB_SHARED_TX_START + BK7258_MB_SHARED_TX_SIZE <=
+               BK7258_SWAP_BASE + BK7258_SWAP_SIZE,
+               "mailbox shared TX window lies outside SWAP");
 _Static_assert(BK7258_MB_UART_RX_ADDRESS >= BK7258_SWAP_BASE &&
                BK7258_MB_UART_RX_ADDRESS + BK7258_MB_UART_CHUNK_SIZE <=
                BK7258_SWAP_BASE + BK7258_SWAP_SIZE,
@@ -244,6 +260,8 @@ void bk7258_mbox_discard_deferred(void);
 
 int bk7258_mailbox_init(void);
 int bk7258_mailbox_start(void);
+int bk7258_mailbox_workers_start(void);
+int bk7258_mailbox_workers_activate(void);
 int bk7258_mailbox_send_wire(uint8_t logical_channel,
                              const struct bk7258_mb_wire_message *message,
                              bk7258_mb_tx_complete_t callback, void *arg);
@@ -266,12 +284,16 @@ int bk7258_mbox_send_message(uint8_t command, uint8_t logical_channel,
                              uint32_t param3);
 int bk7258_mailbox_send_pwc(uint8_t command, uint32_t p1, uint32_t p2,
                             uint32_t p3);
-void bk7258_mailbox_set_pwc_rx(void (*callback)(const void *message));
+void bk7258_mailbox_set_pwc_rx(int (*callback)(const void *message));
 int bk7258_mailbox_wait_hw_control(unsigned int timeout_ms);
 int bk7258_mailbox_wait_pwc(unsigned int timeout_ms);
 void bk7258_mailbox_dump_stats(void);
+int bk7258_ipc_heartbeat_start(void);
+void bk7258_ipc_heartbeat_poll(void);
 
 int bk7258_mb_uart_init(void);
+int bk7258_mb_uart_worker_start(void);
+int bk7258_mb_uart_worker_activate(void);
 void bk7258_mb_uart_start(void);
 void bk7258_mb_uart_request_state(void);
 ssize_t bk7258_mbox_uart_write(const uint8_t *data, size_t length);

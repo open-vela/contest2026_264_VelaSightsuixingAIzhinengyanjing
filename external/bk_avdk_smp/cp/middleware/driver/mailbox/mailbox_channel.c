@@ -57,6 +57,9 @@ typedef struct
 	u32		ack_retry_cnt;
 	u32		ack_queue_full_cnt;
 	u32		reset_bad_cnt;
+	u32		last_cmd_header;
+	u32		last_ack_header;
+	u32		last_ack_data1;
 } mb_phy_chnl_cb_t;
 
 typedef struct {
@@ -170,6 +173,8 @@ static volatile u8 ack_read;
 static volatile u8 ack_write;
 static volatile u8 ack_count;
 static volatile u8 ack_sending;
+static volatile u8 s_poll_active;
+void mb_chnl_poll(void);
 
 static void mb_chnl_notify(mb_log_chnl_cb_t *log_chnl_cb_x, u8 count,
 			   mb_chnl_event_t event);
@@ -220,7 +225,10 @@ static inline bk_err_t bk_mailbox_send_safe(mailbox_data_t *data, mailbox_endpoi
 
 static bool mb_chnl_rx_ready(void)
 {
-	return ack_count < MB_ACK_QUEUE_LEN;
+	/* Keep one ACK slot available for the command currently being handled.
+	 * A command must not be consumed and its business callback run if its
+	 * transport ACK cannot be queued. */
+	return ack_count < MB_ACK_QUEUE_LEN - 1;
 }
 
 static void mb_chnl_ack_retry(void)
@@ -268,7 +276,7 @@ static bool mb_chnl_ack_enqueue(u8 destination, const mailbox_data_t *data)
 	u32 flags = mb_chnl_enter_critical();
 	mb_ack_entry_t *entry;
 
-	if (ack_count >= MB_ACK_QUEUE_LEN)
+	if (ack_count >= MB_ACK_QUEUE_LEN - 1)
 	{
 		phy_chnl_x_cb[destination].ack_queue_full_cnt++;
 		mb_chnl_exit_critical(flags);
@@ -367,6 +375,7 @@ static bk_err_t mb_phy_chnl_tx_cmd(u8 log_chnl)
 	cmd_ptr->hdr.state = 0;
 
 	phy_chnl_ptr->tx_hdr_cmd = cmd_ptr->hdr.cmd;
+	phy_chnl_ptr->last_cmd_header = cmd_ptr->hdr.data;
 
 	phy_chnl_ptr->param1 = cmd_ptr->param1;
 	phy_chnl_ptr->param2 = cmd_ptr->param2;
@@ -397,6 +406,12 @@ static bk_err_t mb_phy_chnl_tx_cmd(u8 log_chnl)
 	}
 
 	return BK_OK;
+}
+
+void mb_chnl_start_service(void)
+{
+	/* Mailbox RX and ACK dispatch run in the hardware ISR path.  Retain this
+	 * legacy entry point for callers, but do not start a second poll model. */
 }
 
 static void mb_phy_chnl_rx_ack_isr(mb_phy_chnl_ack_t *ack_ptr)
@@ -483,6 +498,8 @@ static void mb_phy_chnl_rx_ack_isr(mb_phy_chnl_ack_t *ack_ptr)
 	}
 
 	phy_chnl_ptr = &phy_chnl_x_cb[phy_chnl_idx];
+	phy_chnl_ptr->last_ack_header = ack_ptr->hdr.data;
+	phy_chnl_ptr->last_ack_data1 = ack_ptr->data1;
 	log_chnl_cb_x = (mb_log_chnl_cb_t *)(phy_chnl_log_chnl_list[phy_chnl_idx]);
 
 	if(log_chnl_idx >= phy_chnl_log_chnl_num[phy_chnl_idx])
@@ -1147,6 +1164,19 @@ bk_err_t mb_chnl_ctrl(u8 log_chnl, u8 cmd, void * param)
 void mb_chnl_poll(void)
 {
 	u8 phy_idx;
+	u32 poll_flags = mb_chnl_enter_critical();
+
+	/* The CPU1 boot transaction may poll directly while ap_console is also
+	 * scheduled.  Serialize the whole poll pass without holding the channel
+	 * lock across callbacks and physical sends.
+	 */
+	if (s_poll_active)
+	{
+		mb_chnl_exit_critical(poll_flags);
+		return;
+	}
+	s_poll_active = 1;
+	mb_chnl_exit_critical(poll_flags);
 
 	bk_mailbox_poll();
 	mb_chnl_ack_retry();
@@ -1193,6 +1223,10 @@ void mb_chnl_poll(void)
 			mb_chnl_notify(logs, phy_chnl_log_chnl_num[phy_idx],
 					   MB_CHNL_EVENT_ABORT_FAILED);
 	}
+
+	poll_flags = mb_chnl_enter_critical();
+	s_poll_active = 0;
+	mb_chnl_exit_critical(poll_flags);
 }
 
 bk_err_t mb_chnl_get_diag(u8 peer_cpu, mb_chnl_diag_t *diag)
@@ -1214,6 +1248,9 @@ bk_err_t mb_chnl_get_diag(u8 peer_cpu, mb_chnl_diag_t *diag)
 	diag->ack_retry = phy->ack_retry_cnt;
 	diag->ack_queue_full = phy->ack_queue_full_cnt;
 	diag->reset_bad = phy->reset_bad_cnt;
+	diag->last_cmd_header = phy->last_cmd_header;
+	diag->last_ack_header = phy->last_ack_header;
+	diag->last_ack_data1 = phy->last_ack_data1;
 	return BK_OK;
 }
 
@@ -1221,6 +1258,12 @@ void mb_chnl_recovered(u8 peer_cpu)
 {
 	if (peer_cpu < PHY_CHNL_NUM && peer_cpu != SELF_CPU)
 		phy_chnl_x_cb[peer_cpu].recovering = 0;
+}
+
+void mb_chnl_quiesce(u8 peer_cpu)
+{
+	if (peer_cpu < PHY_CHNL_NUM && peer_cpu != SELF_CPU)
+		phy_chnl_x_cb[peer_cpu].recovering = 1;
 }
 
 void mb_debug_status() {

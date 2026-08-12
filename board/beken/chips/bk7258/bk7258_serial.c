@@ -14,6 +14,7 @@
 
 #include "arm_internal.h"
 #include "hardware/bk7258_mbox.h"
+#include "bk7258_boottrace.h"
 
 #ifdef CONFIG_BK7258_MB_UART0_CONSOLE
 #ifndef CONFIG_BK7258_MB_UART0_SERIAL_RXBUFSIZE
@@ -220,12 +221,15 @@ void arm_serialinit(void)
 {
   int ret;
 
+  bk7258_boottrace_primary(BK7258_BOOT_SERIAL_ENTER);
   ret = bk7258_mailbox_init();
   if (ret < 0)
     {
       syslog(LOG_ERR, "mailbox: logical init failed: %d\n", ret);
       return;
     }
+
+  bk7258_boottrace_primary(BK7258_BOOT_SERIAL_LOGICAL);
 
   ret = bk7258_mb_uart_init();
   if (ret < 0)
@@ -234,6 +238,8 @@ void arm_serialinit(void)
       return;
     }
 
+  bk7258_boottrace_primary(BK7258_BOOT_SERIAL_UART);
+
   ret = bk7258_mailbox_start();
   if (ret < 0)
     {
@@ -241,7 +247,8 @@ void arm_serialinit(void)
       return;
     }
 
-  bk7258_mb_uart_start();
+  bk7258_boottrace_primary(BK7258_BOOT_SERIAL_PHYSICAL);
+
 #ifdef CONFIG_BK7258_MB_UART0_CONSOLE
   bk7258_mbox_uart_set_callback(bk7258_serial_available,
                                 &g_bk7258_mb_uart0);
@@ -258,6 +265,7 @@ void arm_serialinit(void)
       syslog(LOG_ERR, "mb-uart0: /dev/ttyMB0 register failed: %d\n", ret);
     }
 #endif
+  bk7258_boottrace_primary(BK7258_BOOT_SERIAL_DONE);
 }
 
 void up_putc(int ch)

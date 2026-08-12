@@ -14,15 +14,18 @@
 #include <nuttx/clock.h>
 #include <nuttx/irq.h>
 #include <nuttx/kthread.h>
+#include <nuttx/sched.h>
 #include <nuttx/semaphore.h>
 #include <nuttx/signal.h>
 #include <nuttx/spinlock.h>
 
 #include "bk7258_driver.h"
+#include "bk7258_boottrace.h"
+#include "bk7258_smp.h"
 #include "hardware/bk7258_mbox.h"
 
 #define MB_CHANNEL_COUNT       5u
-#define MB_RX_CHANNEL_COUNT    3u
+#define MB_RX_CHANNEL_COUNT    4u
 #define MB_ACK_SLOT_COUNT      8u
 #define MB_ACK_HIGH_WATER      3u
 #define MB_TIMEOUT             MSEC2TICK(200)
@@ -30,6 +33,8 @@
 #define MB_PROBE_MAX_ATTEMPTS  3u
 #define MB_RECOVERY_SLOT_COUNT 4u
 #define MB_DOWN_RETRY          MSEC2TICK(100)
+#define MB_SECONDARY_READY_POLLS 4000000u
+#define MB_TX_PRIORITY         105
 
 enum ack_slot_state
 {
@@ -94,6 +99,11 @@ struct transport_stats
   uint32_t link_ready;
   uint32_t link_down;
   uint32_t deferred_command;
+  uint32_t bad_ack_reason;
+  uint32_t last_ack_header;
+  uint32_t last_active_header;
+  uint32_t last_command_header;
+  uint32_t last_tx_error;
 };
 
 static const uint8_t g_channel_ids[MB_CHANNEL_COUNT] =
@@ -109,7 +119,8 @@ static const uint8_t g_rx_channel_ids[MB_RX_CHANNEL_COUNT] =
 {
   BK7258_MB_CHAN_WIFI_CMD_RX,
   BK7258_MB_CHAN_WIFI_DATA_RX,
-  BK7258_MB_CHAN_UART0_RX
+  BK7258_MB_CHAN_UART0_RX,
+  BK7258_MB_CHAN_SARADC_RX
 };
 
 static struct logical_channel g_channels[MB_CHANNEL_COUNT];
@@ -119,19 +130,20 @@ static struct ack_slot g_ack_slots[MB_ACK_SLOT_COUNT];
 static struct transport_stats g_stats;
 static bk7258_mb_channel_rx_t g_rx_callbacks[MB_RX_CHANNEL_COUNT];
 static void *g_rx_args[MB_RX_CHANNEL_COUNT];
-static void (*g_pwc_rx)(const void *message);
+static int (*g_pwc_rx)(const void *message);
 static bk7258_mb_link_callback_t g_link_callback;
 static void *g_link_arg;
 static sem_t g_tx_sem;
 static sem_t g_diag_sem;
-static sem_t g_worker_ready_sem;
-static volatile int g_tx_worker_result;
-static volatile int g_diag_worker_result;
 static uint32_t g_send_order;
 static uint8_t g_tx_seq;
 static enum bk7258_mb_link_state g_link_state;
 static bool g_initialized;
 static bool g_physical_started;
+static bool g_tx_worker_created;
+static bool g_diag_worker_created;
+static bool g_workers_started;
+static int g_tx_worker_pid;
 static bool g_reset_pending;
 static bool g_probe_requested;
 static uint8_t g_probe_attempts;
@@ -153,6 +165,26 @@ static int bind_worker_to_primary(void)
 #else
   return OK;
 #endif
+}
+
+static int wait_secondary_scheduler(void)
+{
+#ifdef CONFIG_SMP
+  uint32_t polls = 0;
+
+  while (!bk7258_smp_secondary_is_ready() &&
+         polls++ < MB_SECONDARY_READY_POLLS)
+    {
+      __asm__ volatile("nop");
+    }
+
+  if (!bk7258_smp_secondary_is_ready())
+    {
+      return -ETIMEDOUT;
+    }
+#endif
+
+  return OK;
 }
 
 _Static_assert(MB_ACK_SLOT_COUNT >= 2u * 3u + 1u,
@@ -232,18 +264,28 @@ static int send_slot(struct bk7258_mb_wire_message *message,
   uint32_t wire[2];
   int ret;
 
+  *order = ++g_send_order;
   wire[0] = (uint32_t)(uintptr_t)message;
   wire[1] = sizeof(*message);
   __asm__ volatile("dmb sy" ::: "memory");
   ret = bk7258_mbox_send(0, wire);
   if (ret == OK)
     {
-      *order = ++g_send_order;
       g_stats.tx++;
     }
   else if (ret == -EAGAIN)
     {
       g_stats.fifo_full++;
+    }
+
+  if (ret < 0)
+    {
+      g_stats.last_tx_error = (uint32_t)(-ret);
+      bk7258_boottrace_detail(3,
+        (g_stats.last_tx_error & 0xffu) |
+        ((g_stats.timeout & 0xffu) << 8) |
+        ((g_stats.fifo_full & 0xffu) << 16) |
+        ((g_stats.ack_overflow & 0xffu) << 24));
     }
 
   return ret;
@@ -297,15 +339,15 @@ static void complete_transaction(struct active_transaction *active,
       channel->result = result;
     }
 
-  if (active->callback != NULL)
-    {
-      active->callback(ack, result, active->arg);
-    }
-
   active->busy = false;
   if (result == OK)
     {
       release_acks_before(active->order);
+    }
+
+  if (active->callback != NULL)
+    {
+      active->callback(ack, result, active->arg);
     }
 }
 
@@ -480,15 +522,19 @@ static int dispatch_locked(void)
 
       if (g_link_state == BK7258_MB_LINK_PROBING)
         {
-          if (g_channel_ids[i] != BK7258_MB_CHAN_UART0_TX ||
-              bk7258_mb_header_cmd(&channel->pending) !=
+          if (g_channel_ids[i] == BK7258_MB_CHAN_UART0_TX &&
+              bk7258_mb_header_cmd(&channel->pending) ==
               BK7258_MB_UART_STATE)
+            {
+              active = &epoch->probe;
+            }
+          else
             {
               continue;
             }
 
-          active = &epoch->probe;
-          if (active->quarantine && !epoch->replay)
+          if (active == &epoch->probe && active->quarantine &&
+              !epoch->replay)
             {
               return -ENOLINK;
             }
@@ -521,13 +567,14 @@ static int dispatch_locked(void)
       active->arg = channel->arg;
       active->channel_index = i;
       active->started = clock_systime_ticks();
+      active->busy = true;
       ret = send_slot(&active->message, &active->order);
       if (ret < 0)
         {
+          active->busy = false;
           return ret;
         }
 
-      active->busy = true;
       if (active == &epoch->probe)
         {
           if (epoch->first_probe_order == 0)
@@ -545,18 +592,39 @@ static int dispatch_locked(void)
   return OK;
 }
 
-static bool valid_ack_header(const struct bk7258_mb_wire_message *message,
-                             const struct active_transaction *active)
+static uint32_t ack_header_reason(
+  const struct bk7258_mb_wire_message *message,
+  const struct active_transaction *active)
 {
   uint8_t control = bk7258_mb_header_ctrl(message);
+  uint32_t reason = 0;
 
-  return active->busy && control == BK7258_MB_CTRL_ACK_BOX &&
-         bk7258_mb_header_channel(message) ==
-           bk7258_mb_header_channel(&active->message) &&
-         bk7258_mb_header_seq(message) ==
-           bk7258_mb_header_seq(&active->message) &&
-         bk7258_mb_header_cmd(message) ==
-           bk7258_mb_header_cmd(&active->message);
+  if (!active->busy)
+    {
+      return 1u;
+    }
+
+  if (control != BK7258_MB_CTRL_ACK_BOX)
+    {
+      reason |= 2u;
+    }
+  if (bk7258_mb_header_channel(message) !=
+      bk7258_mb_header_channel(&active->message))
+    {
+      reason |= 4u;
+    }
+  if (bk7258_mb_header_seq(message) !=
+      bk7258_mb_header_seq(&active->message))
+    {
+      reason |= 8u;
+    }
+  if (bk7258_mb_header_cmd(message) !=
+      bk7258_mb_header_cmd(&active->message))
+    {
+      reason |= 16u;
+    }
+
+  return reason;
 }
 
 static bool valid_uart_ack(const struct bk7258_mb_wire_message *message)
@@ -572,6 +640,8 @@ static void handle_ack(const struct bk7258_mb_wire_message *message)
   struct active_transaction *active;
   bool replay;
   int result;
+  uint32_t reason;
+
 
   active = busy_probe();
   if (active == NULL)
@@ -579,11 +649,19 @@ static void handle_ack(const struct bk7258_mb_wire_message *message)
       active = &g_active;
     }
 
-  if (!valid_ack_header(message, active))
+  g_stats.last_ack_header = message->header;
+  g_stats.last_active_header = active->message.header;
+  reason = ack_header_reason(message, active);
+  if (reason != 0)
     {
       g_stats.bad_ack++;
+      g_stats.bad_ack_reason |= reason;
+      bk7258_boottrace_detail(0, g_stats.last_ack_header);
+      bk7258_boottrace_detail(1, g_stats.last_active_header);
+      bk7258_boottrace_detail(2, g_stats.bad_ack_reason);
       return;
     }
+
 
   if (bk7258_mb_header_channel(message) == BK7258_MB_CHAN_UART0_TX &&
       !valid_uart_ack(message))
@@ -591,12 +669,16 @@ static void handle_ack(const struct bk7258_mb_wire_message *message)
       /* Keep active stable.  A malformed ACK is not an ownership proof. */
 
       g_stats.bad_ack++;
+      g_stats.bad_ack_reason |= 32u;
+      bk7258_boottrace_detail(2, g_stats.bad_ack_reason);
       return;
     }
 
   if ((bk7258_mb_header_state(message) & ~BK7258_MB_STATE_COM_FAIL) != 0)
     {
       g_stats.bad_ack++;
+      g_stats.bad_ack_reason |= 64u;
+      bk7258_boottrace_detail(2, g_stats.bad_ack_reason);
       return;
     }
 
@@ -682,6 +764,8 @@ static int handle_command(const struct bk7258_mb_wire_message *message)
   uint8_t state = 0;
   int ret = -ENOSYS;
 
+  g_stats.last_command_header = message->header;
+
   if ((control & BK7258_MB_CTRL_SYNC_TX) == 0)
     {
       slot = alloc_ack_slot();
@@ -725,7 +809,31 @@ static int handle_command(const struct bk7258_mb_wire_message *message)
     }
   else if (channel == BK7258_MB_CHAN_PWC_RX && g_pwc_rx != NULL)
     {
-      g_pwc_rx(message);
+      ret = g_pwc_rx(message);
+      if (ret == -EAGAIN)
+        {
+          if (slot != NULL)
+            {
+              slot->state = ACK_SLOT_FREE;
+            }
+
+          g_stats.deferred_command++;
+          return -EAGAIN;
+        }
+      else if (ret < 0)
+        {
+          state = BK7258_MB_STATE_COM_FAIL;
+        }
+    }
+  else if (channel == BK7258_MB_CHAN_SARADC_RX &&
+           (bk7258_mb_header_cmd(message) == 0u ||
+            bk7258_mb_header_cmd(message) == 1u) &&
+           message->payload_address == 1u &&
+           message->payload_length == 0u && message->flags == 0u &&
+           message->crc8 == 0u && message->reserved == 0u)
+    {
+      /* Match Armino's SARADC operation-notification ABI. */
+      ack_flags = 2u;
       ret = OK;
     }
   else
@@ -807,8 +915,6 @@ static int mailbox_diag_worker(int argc, char **argv)
   (void)argc;
   (void)argv;
   ret = bind_worker_to_primary();
-  g_diag_worker_result = ret < 0 ? -EXDEV : OK;
-  nxsem_post(&g_worker_ready_sem);
   if (ret < 0)
     {
       return -EXDEV;
@@ -817,6 +923,7 @@ static int mailbox_diag_worker(int argc, char **argv)
   for (;;)
     {
       nxsem_wait_uninterruptible(&g_diag_sem);
+      nxsem_reset(&g_diag_sem, 0);
       irqstate_t flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
       enum bk7258_mb_link_state state = g_diag_state;
       bk7258_mb_link_callback_t callback = g_link_callback;
@@ -857,11 +964,19 @@ static int mailbox_tx_worker(int argc, char **argv)
   (void)argc;
   (void)argv;
   ret = bind_worker_to_primary();
-  g_tx_worker_result = ret < 0 ? -EXDEV : OK;
-  nxsem_post(&g_worker_ready_sem);
   if (ret < 0)
     {
-      return -EXDEV;
+      ret = -EXDEV;
+    }
+#ifdef CONFIG_SMP
+  else if (!bk7258_smp_secondary_is_ready())
+    {
+      ret = -EAGAIN;
+    }
+#endif
+  if (ret < 0)
+    {
+      return ret;
     }
 
   for (;;)
@@ -871,6 +986,7 @@ static int mailbox_tx_worker(int argc, char **argv)
       bool request_probe;
 
       (void)nxsem_tickwait_uninterruptible(&g_tx_sem, MB_WORK_INTERVAL);
+      nxsem_reset(&g_tx_sem, 0);
       flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
 
       probe = busy_probe();
@@ -880,6 +996,11 @@ static int mailbox_tx_worker(int argc, char **argv)
            clock_systime_ticks() - probe->started >= MB_TIMEOUT))
         {
           g_stats.timeout++;
+          bk7258_boottrace_detail(3,
+            (g_stats.last_tx_error & 0xffu) |
+            ((g_stats.timeout & 0xffu) << 8) |
+            ((g_stats.fifo_full & 0xffu) << 16) |
+            ((g_stats.ack_overflow & 0xffu) << 24));
           if (probe != NULL)
             {
               probe->quarantine = true;
@@ -926,8 +1047,6 @@ static int mailbox_tx_worker(int argc, char **argv)
 
 int bk7258_mailbox_init(void)
 {
-  int ret;
-
   if (g_initialized)
     {
       return OK;
@@ -945,42 +1064,95 @@ int bk7258_mailbox_init(void)
   g_peer_reset_generation = 0;
   nxsem_init(&g_tx_sem, 0, 0);
   nxsem_init(&g_diag_sem, 0, 0);
-  nxsem_init(&g_worker_ready_sem, 0, 0);
-  g_tx_worker_result = -EINPROGRESS;
-  g_diag_worker_result = -EINPROGRESS;
-  ret = kthread_create("mbox-v2", 105, 2048, mailbox_tx_worker, NULL);
-  if (ret < 0)
-    {
-      return ret;
-    }
-  if (nxsem_tickwait_uninterruptible(&g_worker_ready_sem,
-                                     MSEC2TICK(200)) < 0)
-    {
-      return -ETIMEDOUT;
-    }
-  if (g_tx_worker_result < 0)
-    {
-      return g_tx_worker_result;
-    }
-
-  ret = kthread_create("mbox-diag", 80, 1024, mailbox_diag_worker, NULL);
-  if (ret < 0)
-    {
-      return ret;
-    }
-  if (nxsem_tickwait_uninterruptible(&g_worker_ready_sem,
-                                     MSEC2TICK(200)) < 0)
-    {
-      return -ETIMEDOUT;
-    }
-  if (g_diag_worker_result < 0)
-    {
-      return g_diag_worker_result;
-    }
-
+  g_tx_worker_created = false;
+  g_diag_worker_created = false;
+  g_workers_started = false;
+  g_tx_worker_pid = -1;
   g_initialized = true;
   g_physical_started = false;
   return OK;
+}
+
+int bk7258_mailbox_workers_start(void)
+{
+  cpu_set_t cpuset;
+  int ret;
+
+  if (!g_initialized)
+    {
+      return -EAGAIN;
+    }
+
+  if (g_workers_started)
+    {
+      return OK;
+    }
+
+  ret = wait_secondary_scheduler();
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+#ifdef CONFIG_SMP
+  /* All physical CP descriptors must originate on logical CPU0.  Pin the
+   * creator before activating the workers so their inherited affinity is
+   * CPU0-only from their first scheduled instruction. */
+
+  CPU_ZERO(&cpuset);
+  CPU_SET(0, &cpuset);
+  ret = sched_setaffinity(0, sizeof(cpuset), &cpuset);
+  if (ret < 0)
+    {
+      return ret;
+    }
+#endif
+
+  if (!g_tx_worker_created)
+    {
+      /* Discard wakeups accumulated before a worker existed.  Transport
+       * state remains authoritative and will be checked on the first timed
+       * worker pass. */
+
+      nxsem_reset(&g_tx_sem, 0);
+      ret = kthread_create("mbox-v2", MB_TX_PRIORITY, 2048,
+                           mailbox_tx_worker, NULL);
+      if (ret < 0)
+        {
+          return ret;
+        }
+
+      g_tx_worker_created = true;
+      g_tx_worker_pid = ret;
+    }
+
+  if (!g_diag_worker_created)
+    {
+      nxsem_reset(&g_diag_sem, 0);
+      ret = kthread_create("mbox-diag", 80, 1024, mailbox_diag_worker, NULL);
+      if (ret < 0)
+        {
+          return ret;
+        }
+
+      g_diag_worker_created = true;
+    }
+
+  g_workers_started = true;
+  return OK;
+}
+
+int bk7258_mailbox_workers_activate(void)
+{
+  struct sched_param param;
+
+  if (!g_workers_started || g_tx_worker_pid < 0)
+    {
+      return -EAGAIN;
+    }
+
+  param.sched_priority = MB_TX_PRIORITY;
+  return sched_setparam(g_tx_worker_pid, &param) < 0 ? -errno : OK;
 }
 
 int bk7258_mailbox_start(void)
@@ -1014,7 +1186,6 @@ int bk7258_mailbox_send_wire(uint8_t logical_channel,
   struct logical_channel *channel;
   unsigned int index;
   irqstate_t flags;
-  int ret;
 
   if (!g_initialized || !g_physical_started || message == NULL)
     {
@@ -1029,6 +1200,7 @@ int bk7258_mailbox_send_wire(uint8_t logical_channel,
 
   flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
   channel = &g_channels[index];
+
   if (channel->queued)
     {
       rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
@@ -1056,16 +1228,20 @@ int bk7258_mailbox_send_wire(uint8_t logical_channel,
   channel->arg = arg;
   channel->result = -EINPROGRESS;
   channel->queued = true;
-  ret = dispatch_locked();
-  if (ret < 0 && ret != -EAGAIN)
+
+  if (up_cpu_index() == 0)
     {
-      channel->queued = false;
-      channel->result = ret;
+      (void)dispatch_locked();
     }
 
   rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
+
+  /* CPU1 callers only enqueue work.  Physical descriptors to the CP still
+   * originate exclusively from logical CPU0.
+   */
+
   nxsem_post(&g_tx_sem);
-  return ret == -EAGAIN ? OK : ret;
+  return OK;
 }
 
 int bk7258_mailbox_register_rx(uint8_t logical_channel,
@@ -1097,13 +1273,12 @@ int bk7258_mailbox_start_probe(void)
     {
       select_recovery_epoch();
     }
-  else if (g_link_state == BK7258_MB_LINK_READY)
-    {
-      set_link_state(BK7258_MB_LINK_PROBING);
-    }
+  /* A probe request is idempotent once the transport is ready.  The boot
+   * wait loop and the UART worker can request a probe concurrently; reopening
+   * a READY link here would abort a valid state ACK and race the first PWC
+   * transaction. */
 
   rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
-  nxsem_post(&g_tx_sem);
   return OK;
 }
 
@@ -1151,14 +1326,35 @@ bool bk7258_mailbox_link_ready(void)
 int bk7258_mailbox_wait_link_ready(unsigned int timeout_ms)
 {
   clock_t deadline = clock_systime_ticks() + MSEC2TICK(timeout_ms);
+  clock_t next_probe = clock_systime_ticks();
 
   while (!bk7258_mailbox_link_ready())
     {
+      clock_t now = clock_systime_ticks();
+
       if ((int32_t)(clock_systime_ticks() - deadline) >= 0)
         {
           return -ETIMEDOUT;
         }
 
+      /* Keep the boot-time probe self-starting even if the initial
+       * ABORTING -> PROBING worker wakeup was consumed before RESET was
+       * dispatched.  This only marks STATE pending; normal transaction
+       * serialization remains in the mailbox workers. */
+      if ((int32_t)(now - next_probe) >= 0)
+        {
+          /* The TX worker can complete STATE between the loop condition and
+           * this retry point.  Do not reopen a link that has just become
+           * ready. */
+          if (!bk7258_mailbox_link_ready())
+            {
+              bk7258_mailbox_start_probe();
+              bk7258_mb_uart_request_state();
+            }
+          next_probe = now + MSEC2TICK(100);
+        }
+
+      bk7258_mbox_kick_rx();
       nxsig_usleep(1000);
     }
 
@@ -1207,7 +1403,7 @@ int bk7258_mailbox_send_pwc(uint8_t command, uint32_t p1, uint32_t p2,
                                   p1, p2, p3);
 }
 
-void bk7258_mailbox_set_pwc_rx(void (*callback)(const void *message))
+void bk7258_mailbox_set_pwc_rx(int (*callback)(const void *message))
 {
   g_pwc_rx = callback;
 }
@@ -1239,9 +1435,16 @@ static int wait_channel(uint8_t logical_channel, unsigned int timeout_ms)
 
       if ((int32_t)(clock_systime_ticks() - deadline) >= 0)
         {
+          bk7258_mailbox_dump_stats();
           return -ETIMEDOUT;
         }
 
+      /* UART link bring-up drains the physical mailbox explicitly because
+       * the IRQ may not be dispatched while board_late_initialize() owns the
+       * boot transaction.  PWC waits run in the same context and need the
+       * same progress guarantee; otherwise CP can process 0x5 and enqueue its
+       * ACK while AP remains asleep waiting for an IRQ-side drain. */
+      bk7258_mbox_kick_rx();
       nxsig_usleep(1000);
     }
 }
@@ -1262,12 +1465,13 @@ void bk7258_mailbox_dump_stats(void)
 
   bk7258_mbox_get_stats(&physical);
   printf("mailbox: link=%u active=%u/%u tx=%lu rx=%lu timeout=%lu "
-         "bad_ack=%lu bad_header=%lu ack_used=%u fifo_full=%lu "
+         "bad_ack=%lu reason=%08lx bad_header=%lu ack_used=%u fifo_full=%lu "
          "deferred=%lu recovery=%lu/%lu ready=%lu down=%lu\n",
          g_link_state, g_active.busy, busy_probe() != NULL,
          (unsigned long)g_stats.tx, (unsigned long)g_stats.rx,
          (unsigned long)g_stats.timeout, (unsigned long)g_stats.bad_ack,
-         (unsigned long)g_stats.bad_header, ack_slots_used(),
+          (unsigned long)g_stats.bad_ack_reason,
+          (unsigned long)g_stats.bad_header, ack_slots_used(),
          (unsigned long)g_stats.fifo_full,
          (unsigned long)g_stats.deferred_command,
          (unsigned long)g_stats.recovery_cycle,
@@ -1283,7 +1487,12 @@ void bk7258_mailbox_dump_stats(void)
          (unsigned long)physical.write_error,
          (unsigned long)physical.read_error,
          (unsigned long)physical.write_full,
-         (unsigned long)physical.descriptor_full,
-         (unsigned long)physical.descriptor_deferred);
+          (unsigned long)physical.descriptor_full,
+          (unsigned long)physical.descriptor_deferred);
+  printf("mailbox-last: ack=%08lx active=%08lx cmd=%08lx txerr=%08lx\n",
+         (unsigned long)g_stats.last_ack_header,
+         (unsigned long)g_stats.last_active_header,
+         (unsigned long)g_stats.last_command_header,
+         (unsigned long)g_stats.last_tx_error);
   bk7258_mbox_uart_dump_stats();
 }

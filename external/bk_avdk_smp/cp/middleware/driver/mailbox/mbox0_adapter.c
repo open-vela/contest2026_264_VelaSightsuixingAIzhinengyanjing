@@ -8,7 +8,7 @@
 #define MBOX0_CTRL_SYNC_TX       0x02
 #define MBOX0_CTRL_RESET         0x04
 #define MBOX0_CMD_SLOT_NUM       3
-#define MBOX0_ACK_SLOT_NUM       4
+#define MBOX0_ACK_SLOT_NUM       8
 #define MBOX0_RX_DESC_NUM        7
 #define MBOX0_SLOT_QUARANTINE_MS 20
 #define MBOX0_AP_RAM_START       0x28010000u
@@ -87,9 +87,17 @@ static void mbox0_reap_slots(u8 dst)
 		reaped += slots->cmd_used[i] != 0;
 		slots->cmd_used[i] = 0;
 	}
-	/* ACK slots are released only by a later command ACK fence.  FIFO empty
-	 * alone does not prove that the peer finished copying the pointed data.
+	/* The hardware FIFO contains pointers into these slots.  Once it has
+	 * remained empty for the quarantine interval, the peer has had ample time
+	 * to copy every published entry.  ACK-only AP traffic has no later command
+	 * fence, so retaining these slots indefinitely exhausts the pool during
+	 * RESET/STATE/PWC bring-up.
 	 */
+	for (i = 0; i < MBOX0_ACK_SLOT_NUM; i++)
+	{
+		reaped += slots->ack_used[i] != 0;
+		slots->ack_used[i] = 0;
+	}
 	reaped += slots->reset_used != 0;
 	reaped += slots->sync_used != 0;
 	slots->reset_used = 0;
@@ -251,7 +259,9 @@ static void mbox0_rx_isr(mbox0_message_t *msg)
 {
 	u32 address;
 	u32 source;
+	u32 reaped = 0;
 	mbox0_rx_desc_t *desc;
+	u8 ctrl;
 	u8 i;
 
 	if (!msg)
@@ -307,10 +317,44 @@ static void mbox0_rx_isr(mbox0_message_t *msg)
 		return;
 	}
 	memcpy(&desc->data, (void *)address, sizeof(desc->data));
+	adapter_diag.last_rx_header = desc->data.param0;
+	ctrl = (desc->data.param0 >> 12) & 0x0f;
+	if ((ctrl & MBOX0_CTRL_ACK_BOX) == 0)
+	{
+		adapter_diag.last_cmd_header = desc->data.param0;
+		adapter_diag.cmd_received++;
+	}
+	if (ctrl == 0)
+	{
+		/* AP serializes ordinary logical commands.  Receiving the next one
+		 * proves that it copied the preceding CP transport ACK, providing an
+		 * exact lifetime fence even during a continuous UART/PWC burst. */
+		for (i = 0; i < MBOX0_ACK_SLOT_NUM; i++)
+		{
+			reaped += mailbox_slots[source].ack_used[i] != 0;
+			mailbox_slots[source].ack_used[i] = 0;
+		}
+		adapter_diag.tx_reaped += reaped;
+	}
 	desc->source = source;
 	desc->order = ++rx_order;
 	desc->used = 1;
 	rx_count++;
+	adapter_diag.rx_accepted++;
+
+	/* The vendor adapter dispatches the logical callback from the mailbox
+	 * receive path.  Keep ACK generation in the same interrupt transaction;
+	 * delaying it until mb_chnl_poll() can stall AP bring-up. */
+	if (mailbox_callback[source] != NULL)
+	{
+		adapter_diag.callback_called++;
+		mailbox_callback[source](&desc->data);
+	}
+	else
+		adapter_diag.callback_missing++;
+
+	desc->used = 0;
+	rx_count--;
 
 }
 
@@ -390,7 +434,14 @@ bk_err_t bk_mailbox_send(mailbox_data_t *data, mailbox_endpoint_t src,
 	if (ret_code != MBOX0_HAL_OK)
 	{
 		mbox0_release_slot(dst, kind, index);
+		if (ctrl & MBOX0_CTRL_ACK_BOX)
+			adapter_diag.ack_send_fail++;
 		return BK_ERR_MAILBOX_NOT_INIT;
+	}
+	if (ctrl == MBOX0_CTRL_ACK_BOX)
+	{
+		adapter_diag.last_ack_header = slot->data.param0;
+		adapter_diag.ack_sent++;
 	}
 	return BK_OK;
 }

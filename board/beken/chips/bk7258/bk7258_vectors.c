@@ -14,6 +14,10 @@ extern void __start(void);
 extern void exception_common(void);
 extern void exception_direct(void);
 extern uint8_t __idle_stack_top[];
+#ifdef CONFIG_SMP
+extern void bk7258_secondary_start(void);
+extern uint8_t __secondary_boot_stack_top[];
+#endif
 
 typedef void (*vector_t)(void);
 
@@ -46,3 +50,12 @@ const vector_t _vectors[NR_IRQS]
   [2 ... 14] = exception_common,
   [15 ... (NR_IRQS - 1)] = exception_direct,
 };
+
+#ifdef CONFIG_SMP
+const vector_t g_bk7258_secondary_vectors[2]
+  __attribute__((used, section(".bk_secondary_vectors"), aligned(512))) =
+{
+  (vector_t)__secondary_boot_stack_top,
+  bk7258_secondary_start
+};
+#endif

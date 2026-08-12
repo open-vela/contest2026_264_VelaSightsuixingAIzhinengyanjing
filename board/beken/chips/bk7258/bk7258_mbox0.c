@@ -15,9 +15,11 @@
 #include "arm_internal.h"
 #include "hardware/bk7258_mbox.h"
 #include "hardware/bk7258_sysctrl.h"
+#include "bk7258_boottrace.h"
 #include "irq.h"
 
 #define MBOX_RX_DESC_COUNT      (2u * 3u + 1u)
+#define MBOX_IRQ_DRAIN_BUDGET   8u
 
 struct mbox_rx_descriptor
 {
@@ -33,6 +35,15 @@ static uint32_t g_processing_order;
 static bool g_mbox_ready;
 static bool g_mbox_smp_ready;
 static struct bk7258_mbox_stats g_stats;
+
+static void mbox_trace_errors(void)
+{
+  bk7258_boottrace_detail(4,
+    (g_stats.bad_source & 0xffu) |
+    ((g_stats.bad_length & 0xffu) << 8) |
+    ((g_stats.bad_address & 0xffu) << 16) |
+    ((g_stats.descriptor_full & 0xffu) << 24));
+}
 
 _Static_assert(MBOX_RX_DESC_COUNT > 2u * 3u,
                "RX descriptors must hold a deferred command and two FIFOs");
@@ -76,12 +87,14 @@ static bool mbox_valid_envelope(uint8_t source, uint32_t address,
   if (source != 0)
     {
       g_stats.bad_source++;
+      mbox_trace_errors();
       return false;
     }
 
   if (length != BK7258_MB_MESSAGE_SIZE)
     {
       g_stats.bad_length++;
+      mbox_trace_errors();
       return false;
     }
 
@@ -89,6 +102,7 @@ static bool mbox_valid_envelope(uint8_t source, uint32_t address,
       address > BK7258_CP_RAM_END - BK7258_MB_MESSAGE_SIZE)
     {
       g_stats.bad_address++;
+      mbox_trace_errors();
       return false;
     }
 
@@ -97,6 +111,7 @@ static bool mbox_valid_envelope(uint8_t source, uint32_t address,
 
 int bk7258_mbox_send(uint8_t destination, const uint32_t data[2])
 {
+  irqstate_t flags;
   uintptr_t status;
   int cpu = up_cpu_index();
 
@@ -119,17 +134,24 @@ int bk7258_mbox_send(uint8_t destination, const uint32_t data[2])
   status = destination == 0 ? BK7258_MBOX_CH0_STATUS :
             destination == 1 ? BK7258_MBOX_CH1_STATUS :
                                BK7258_MBOX_CH2_STATUS;
+  flags = up_irq_save();
   if ((getreg32(status) & 1u) != 0)
     {
+      up_irq_restore(flags);
       return -EAGAIN;
     }
+
+  /* TDATA0/TDATA1 are staging registers and TID commits the descriptor.
+   * Keep raw SMP kicks and transport sends from interleaving these writes.
+   */
 
   putreg32(data[0], cpu == 0 ? BK7258_MBOX_CH1_TDATA0 :
                                BK7258_MBOX_CH2_TDATA0);
   putreg32(data[1], cpu == 0 ? BK7258_MBOX_CH1_TDATA1 :
                                BK7258_MBOX_CH2_TDATA1);
   putreg32(destination, cpu == 0 ? BK7258_MBOX_CH1_TID :
-                                  BK7258_MBOX_CH2_TID);
+                                   BK7258_MBOX_CH2_TID);
+  up_irq_restore(flags);
   return OK;
 }
 
@@ -222,17 +244,25 @@ static int bk7258_mbox_irq(int irq, void *context, void *arg)
   uintptr_t rdata1;
   uintptr_t sidreg;
   int cpu = up_cpu_index();
+  unsigned int budget = MBOX_IRQ_DRAIN_BUDGET;
 
   (void)irq;
   (void)context;
   (void)arg;
 
   mbox_clear_errors(cpu);
+  if (cpu == 1 && bk7258_boottrace_secondary_stage() >=
+                  BK7258_BOOT_SECONDARY_ACK &&
+                  bk7258_boottrace_secondary_stage() <
+                  BK7258_BOOT_SECONDARY_MBOX_ENTER)
+    {
+      bk7258_boottrace_secondary(BK7258_BOOT_SECONDARY_MBOX_ENTER);
+    }
   sidreg = cpu == 0 ? BK7258_MBOX_CH1_SID : BK7258_MBOX_CH2_SID;
   rdata0 = cpu == 0 ? BK7258_MBOX_CH1_RDATA0 : BK7258_MBOX_CH2_RDATA0;
   rdata1 = cpu == 0 ? BK7258_MBOX_CH1_RDATA1 : BK7258_MBOX_CH2_RDATA1;
 
-  while ((bk7258_mbox_rx_status() & 2u) == 0)
+  while ((bk7258_mbox_rx_status() & 2u) == 0 && budget-- != 0)
     {
       struct mbox_rx_descriptor *desc;
       uint32_t address;
@@ -248,6 +278,7 @@ static int bk7258_mbox_irq(int irq, void *context, void *arg)
       if (cpu == 0 && desc == NULL)
         {
           g_stats.descriptor_full++;
+          mbox_trace_errors();
           break;
         }
 
@@ -259,6 +290,11 @@ static int bk7258_mbox_irq(int irq, void *context, void *arg)
         {
           if (source == (uint8_t)(2 - cpu))
             {
+              if (cpu == 1 && address == BK7258_MBOX_RAW_KICK)
+                {
+                  bk7258_boottrace_secondary(BK7258_BOOT_SECONDARY_MBOX_RAW);
+                }
+
               bk7258_smp_ipi_receive(irq, context, address);
             }
           else
@@ -266,6 +302,7 @@ static int bk7258_mbox_irq(int irq, void *context, void *arg)
               if (cpu == 0)
                 {
                   g_stats.bad_source++;
+                  mbox_trace_errors();
                 }
             }
 
@@ -289,12 +326,21 @@ static int bk7258_mbox_irq(int irq, void *context, void *arg)
       desc->order = ++g_rx_order;
       desc->used = true;
       g_stats.rx_messages++;
+      bk7258_boottrace_detail(0, desc->message.header);
+      bk7258_boottrace_detail(1, address);
+      bk7258_boottrace_detail(2, g_stats.rx_messages);
       mbox_process_desc();
     }
 
   if (cpu == 0)
     {
       mbox_process_desc();
+    }
+
+  if (cpu == 1 && bk7258_boottrace_secondary_stage() ==
+                  BK7258_BOOT_SECONDARY_MBOX_RAW)
+    {
+      bk7258_boottrace_secondary(BK7258_BOOT_SECONDARY_MBOX_EXIT);
     }
 
   return OK;

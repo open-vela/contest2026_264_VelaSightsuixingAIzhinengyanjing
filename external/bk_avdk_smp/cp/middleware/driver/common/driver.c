@@ -148,7 +148,7 @@ static void ap_bridge_log_output(const u8 *line, u16 length, bool prefix_line)
 	output_length += length;
 	for (retry = 0; retry < AP_BRIDGE_LOG_RETRY_MAX; retry++)
 	{
-		if (shell_log_raw_data(output, output_length))
+		if (shell_log_raw_data_nonblock(output, output_length))
 			return;
 		rtos_delay_milliseconds(AP_BRIDGE_LOG_RETRY_MS);
 	}
@@ -280,7 +280,7 @@ static void ap_bridge_task(beken_thread_arg_t arg)
 			s_ap_bridge.stats.rx_bytes += input_length;
 			if (active_mode == AP_CONSOLE_OUTPUT_RAW)
 			{
-				if (input_length && !shell_log_raw_data(input, input_length))
+				if (input_length && !shell_log_raw_data_nonblock(input, input_length))
 					s_ap_bridge.stats.rx_queue_fail++;
 				continue;
 			}
@@ -912,10 +912,10 @@ int driver_init(void) {
 #endif
 
 #if CONFIG_PSRAM
-	/* Bring up PSRAM by default at boot, instead of only when a test command runs.
-	 * bk_psram_init is idempotent, so repeated calls are safe. */
+	/* The BOOT owner keeps CP PSRAM users independent from OpenVela's vote. */
 	{
-		bk_err_t psram_ret = bk_psram_init();
+		bk_err_t psram_ret = bk_pm_module_vote_psram_ctrl(
+			PM_POWER_PSRAM_MODULE_NAME_BOOT, PM_POWER_MODULE_STATE_ON);
 		if (psram_ret != BK_OK) {
 			BK_LOGE(NULL, "driver_init: bk_psram_init fail:%d\r\n", psram_ret);
 		} else {

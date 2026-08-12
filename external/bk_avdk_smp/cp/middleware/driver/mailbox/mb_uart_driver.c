@@ -19,6 +19,7 @@
 #include <driver/mailbox_channel.h>
 #include <driver/mb_chnl_buff.h>
 #include <driver/mb_uart_driver.h>
+#include <driver/pwr_clk.h>
 #include "mbox0_adapter.h"
 
 #if CONFIG_CACHE_ENABLE
@@ -453,7 +454,11 @@ static void mb_uart_tx_cmpl_isr(mb_uart_cb_t *chnl_cb, mb_chnl_ack_t *ack_buf)  
 			chnl_cb->link_ready = 1;
 			chnl_cb->link_state = MB_UART_LINK_READY;
 			chnl_cb->probe_count = 0;
-			mb_chnl_recovered(GET_DST_CPU_ID(chnl_cb->chnl_id));
+			if (bk_pm_cp1_work_state_get() ==
+				PM_MAILBOX_COMMUNICATION_FINISH)
+			{
+				mb_chnl_recovered(GET_DST_CPU_ID(chnl_cb->chnl_id));
+			}
 			mb_uart_notify(chnl_cb, MB_UART_EVENT_READY);
 		}
 	}

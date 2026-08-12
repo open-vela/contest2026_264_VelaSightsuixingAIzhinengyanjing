@@ -26,6 +26,7 @@ int shell_level_check_valid(int level);
 #define LOG_STAIC_NONBLOCK_MODE   0x00   /* could use static memory, non-block mode */
 void shell_log_out_port(int block_mode, int level, char * prefix, const char * format, va_list ap);
 int shell_log_raw_data(const u8 *data, u16 data_len);
+int shell_log_raw_data_nonblock(const u8 *data, u16 data_len);
 
 #if CONFIG_MAILBOX
 void shell_ap_console_command(char *pcWriteBuffer, int xWriteBufferLen,

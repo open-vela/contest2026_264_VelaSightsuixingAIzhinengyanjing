@@ -11,8 +11,17 @@ typedef struct {
 	u32 bad_alignment;
 	u32 bad_address;
 	u32 descriptor_overflow;
+	u32 rx_accepted;
 	u32 tx_slot_busy;
 	u32 tx_reaped;
+	u32 last_rx_header;
+	u32 last_cmd_header;
+	u32 last_ack_header;
+	u32 ack_sent;
+	u32 cmd_received;
+	u32 callback_called;
+	u32 callback_missing;
+	u32 ack_send_fail;
 } mbox0_adapter_diag_t;
 
 typedef bool (*mailbox_rx_ready_t)(void);

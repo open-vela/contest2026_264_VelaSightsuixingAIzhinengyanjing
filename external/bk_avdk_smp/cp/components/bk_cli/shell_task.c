@@ -393,7 +393,8 @@ static u8 *alloc_dynamic_log_blk(u16 log_len, u16 *blk_tag);
 static void dynamic_list_push_back(dynamic_log_node *dym_node);
 static u8 * alloc_buffer(int block_mode, u16 *blk_tag, u16 buf_len);
 static inline void dynamic_list_push_back_by_buffer(u8 *packet_buf);
-static int shell_log_raw_data_internel(bool hint, const u8 *data, u16 data_len);
+static int shell_log_raw_data_internel(bool hint, const u8 *data, u16 data_len,
+					      int block_mode);
 static void output_insert_log(u16 buf_len, char *prefix, const char *format, va_list ap);
 static void output_insert_data(const u8 *data, u16 data_len);
 static dynamic_log_node *dynamic_list_switch(void);
@@ -2050,7 +2051,8 @@ static void fwd_mb_log_state(void)
 static void output_mb_log_ex(void)
 {
 	// it will not hint log discarded from cpu1.
-	shell_log_raw_data_internel(1, ipc_fwd_data.common_log_buf.buf, ipc_fwd_data.common_log_buf.len);
+	shell_log_raw_data_internel(1, ipc_fwd_data.common_log_buf.buf, ipc_fwd_data.common_log_buf.len,
+				     s_block_mode);
 	set_fwd_state(MBOX_COMMON_BLK_ID);
 }
 
@@ -2211,7 +2213,8 @@ int shell_level_check_valid(int level)
 	return 1;
 }
 
-static int shell_log_raw_data_internel(bool hint, const u8 *data, u16 data_len)
+static int shell_log_raw_data_internel(bool hint, const u8 *data, u16 data_len,
+					      int block_mode)
 {
 	u8   *packet_buf;
 	u16   blk_tag;
@@ -2229,14 +2232,14 @@ static int shell_log_raw_data_internel(bool hint, const u8 *data, u16 data_len)
 		return 0; // bFALSE;
 	}
 
-	packet_buf = alloc_buffer(s_block_mode, &blk_tag, data_len);
+	packet_buf = alloc_buffer(block_mode, &blk_tag, data_len);
 
 	if (NULL == packet_buf)
 	{
 		if (hint == 0)
 			return 0;
 
-		if (s_block_mode & LOG_BLOCK_MASK) {
+		if (block_mode & LOG_BLOCK_MASK) {
 			output_insert_data(data, data_len);
 			return 1;
 		}
@@ -2272,7 +2275,12 @@ static int shell_log_raw_data_internel(bool hint, const u8 *data, u16 data_len)
 
 int shell_log_raw_data(const u8 *data, u16 data_len)
 {
-	return shell_log_raw_data_internel(1, data, data_len);
+	return shell_log_raw_data_internel(1, data, data_len, s_block_mode);
+}
+
+int shell_log_raw_data_nonblock(const u8 *data, u16 data_len)
+{
+	return shell_log_raw_data_internel(1, data, data_len, LOG_NONBLOCK_MODE);
 }
 
 static int check_block_mode(int block_mode)
@@ -2616,7 +2624,7 @@ static u32 shell_ipc_rx_indication(u16 cmd, log_cmd_t *log_cmd, u16 cpu_id)
 		}
 		else  // no cmd_hint from slave, so must be log from slave.
 		{
-			result = shell_log_raw_data_internel(0, data, data_len);
+			result = shell_log_raw_data_internel(0, data, data_len, s_block_mode);
 
 			if(result == 0) {
 				if (log_handle_init_ok) {

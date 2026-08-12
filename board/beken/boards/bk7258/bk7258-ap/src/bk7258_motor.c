@@ -13,8 +13,12 @@
 #include <unistd.h>
 
 #include <nuttx/board.h>
+#include <nuttx/clock.h>
 #include <nuttx/kthread.h>
+#include <nuttx/sched.h>
+#include <nuttx/semaphore.h>
 #include <nuttx/signal.h>
+#include <syslog.h>
 #include <nuttx/timers/pwm.h>
 
 #include <arch/board/board.h>
@@ -30,8 +34,25 @@
 struct pwm_lowerhalf_s *bk7258_pwminitialize(void);
 int bk7258_mailbox_send_pwc(uint8_t command, uint32_t p1, uint32_t p2,
                             uint32_t p3);
+int bk7258_mailbox_wait_pwc(unsigned int timeout_ms);
 
 #ifdef CONFIG_BK7258_POWER_KEY_MOTOR
+static sem_t g_motor_ready_sem;
+static volatile int g_motor_worker_result;
+
+static int bind_worker_to_primary(void)
+{
+#ifdef CONFIG_SMP
+  cpu_set_t cpuset;
+
+  CPU_ZERO(&cpuset);
+  CPU_SET(0, &cpuset);
+  return sched_setaffinity(0, sizeof(cpuset), &cpuset);
+#else
+  return OK;
+#endif
+}
+
 static int bk7258_motor_button_worker(int argc, char **argv)
 {
   struct pwm_info_s info =
@@ -42,36 +63,64 @@ static int bk7258_motor_button_worker(int argc, char **argv)
   bool candidate = false;
   bool pressed = false;
   unsigned int samples = 0;
+  int ret;
   int fd;
+  clock_t request_start;
 
   (void)argc;
   (void)argv;
-
-  fd = bk7258_mailbox_send_pwc(BK7258_PM_CLK_CTRL_CMD,
-                               BK7258_PM_CLK_ID_PWM_1,
-                               BK7258_PM_CLK_POWER_UP, 0);
+  fd = bind_worker_to_primary();
   if (fd < 0)
     {
-      return fd;
+      ret = -EXDEV;
+      goto ready;
     }
 
-  /* 当前 PWC 仅入队请求，不等待 CP 语义响应。PWM0 时钟门控由 CP 收到
-   * mailbox 命令后才打开，此处延时等待 CP 完成时钟使能，避免后续 PWM
-   * 寄存器写入因时钟未就绪而丢失。待 PWC worker 补上 ACK 消费后应改为
-   * 有界等待。
-   */
+  request_start = clock_systime_ticks();
+  ret = bk7258_mailbox_send_pwc(BK7258_PM_CLK_CTRL_CMD,
+                                BK7258_PM_CLK_ID_PWM_1,
+                                BK7258_PM_CLK_POWER_UP, 0);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "power-key motor: PWM clock request failed: %d\n", ret);
+      goto ready;
+    }
+
+  ret = bk7258_mailbox_wait_pwc(200);
+  syslog(LOG_INFO, "power-key motor: PWM clock transport wait=%d elapsed=%lu ms\n",
+         ret, (unsigned long)TICK2MSEC(clock_systime_ticks() - request_start));
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "power-key motor: PWM clock ACK failed: %d\n", ret);
+      goto ready;
+    }
+
   nxsig_usleep(20000);
   fd = open("/dev/pwm0", O_RDWR);
   if (fd < 0)
     {
-      return -errno;
+      ret = -errno;
+      syslog(LOG_ERR, "power-key motor: open pwm0 failed: %d\n", ret);
+      goto ready;
     }
 
   if (ioctl(fd, PWMIOC_SETCHARACTERISTICS,
             (unsigned long)(uintptr_t)&info) < 0)
     {
-      int ret = -errno;
+      ret = -errno;
+      syslog(LOG_ERR, "power-key motor: set PWM characteristics failed: %d\n",
+             ret);
       close(fd);
+      goto ready;
+    }
+
+  ret = OK;
+
+ready:
+  g_motor_worker_result = ret;
+  nxsem_post(&g_motor_ready_sem);
+  if (ret < 0)
+    {
       return ret;
     }
 
@@ -94,14 +143,21 @@ static int bk7258_motor_button_worker(int argc, char **argv)
       if (samples == BK7258_KEY_DEBOUNCE_COUNT && pressed != candidate)
         {
           int cmd = candidate ? PWMIOC_START : PWMIOC_STOP;
+          clock_t edge_start = clock_systime_ticks();
 
           if (ioctl(fd, cmd, 0) < 0)
             {
+              syslog(LOG_ERR, "power-key motor: PWM cmd=%d failed: %d\n",
+                     cmd, -errno);
               close(fd);
               return -errno;
             }
 
           pressed = candidate;
+          syslog(LOG_INFO,
+                 "power-key motor: button=%u, pwm cmd=%d applied elapsed=%lu ms\n",
+                 candidate, cmd,
+                 (unsigned long)TICK2MSEC(clock_systime_ticks() - edge_start));
         }
 
       nxsig_usleep(BK7258_KEY_POLL_US);
@@ -138,10 +194,23 @@ int bk7258_motor_setup(void)
 int bk7258_power_key_motor_start(void)
 {
 #ifdef CONFIG_BK7258_POWER_KEY_MOTOR
-  int pid = kthread_create("power-key-motor", 100, 1536,
-                           bk7258_motor_button_worker, NULL);
+  int pid;
 
-  return pid < 0 ? pid : OK;
+  nxsem_init(&g_motor_ready_sem, 0, 0);
+  g_motor_worker_result = -EINPROGRESS;
+  pid = kthread_create("power-key-motor", 100, 1536,
+                       bk7258_motor_button_worker, NULL);
+  if (pid < 0)
+    {
+      return pid;
+    }
+  if (nxsem_tickwait_uninterruptible(&g_motor_ready_sem,
+                                     MSEC2TICK(500)) < 0)
+    {
+      return -ETIMEDOUT;
+    }
+
+  return g_motor_worker_result;
 #else
   return OK;
 #endif

@@ -12,6 +12,7 @@ set(SRCS
     bk7258_serial.c
     bk7258_mbox0.c
     bk7258_mailbox_channel.c
+    bk7258_ipc_heartbeat.c
     bk7258_wifi.c
     bk7258_mb_uart.c
     bk7258_pm_pwc.c
