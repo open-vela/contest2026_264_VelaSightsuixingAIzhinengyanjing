@@ -3,7 +3,9 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
+#include <inttypes.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include <nuttx/board.h>
@@ -11,6 +13,8 @@
 #include <nuttx/video/fb.h>
 
 #include <arch/board/board.h>
+
+#include "arm_internal.h"
 
 #include "bk7258_psram.h"
 #include "bk7258_ramdisk.h"
@@ -128,9 +132,48 @@ int bk7258_bringup(void)
   return 0;
 }
 
+/****************************************************************************
+ * Name: bk7258_report_cache
+ *
+ * Description:
+ *   Reports whether this core implements instruction and data caches.
+ *
+ *   The AP executes in place from flash at 0x02150000 and NuttX never enables
+ *   a cache: CONFIG_ARMV8M_ICACHE depends on ARMV8M_HAVE_ICACHE, which the
+ *   BK7258 chip Kconfig does not select, so setting it in a defconfig is
+ *   silently dropped.  That matters because measured throughput here is what
+ *   you would expect from uncached instruction fetch out of QSPI flash: the
+ *   expression renderer costs ~450ms per frame for work that takes 0.09ms on
+ *   a host, a 51200-byte word-at-a-time copy runs at 0.8MB/s, and raising the
+ *   core to 480MHz changed none of it.
+ *
+ *   Whether the cache can be turned on is not obvious from the vendor tree:
+ *   bk7258.defconfig sets CONFIG_CACHE_ENABLE=n and their cache.c guards
+ *   every D-cache operation with a runtime CLIDR test.  CLIDR/CTR exist in
+ *   ARMv8-M whether or not a cache is fitted (they read zero when it is not),
+ *   so reading them is safe and settles the question.
+ *
+ ****************************************************************************/
+
+static void bk7258_report_cache(void)
+{
+  uint32_t clidr = getreg32(0xe000ed78);   /* SCB->CLIDR */
+  uint32_t ctr   = getreg32(0xe000ed7c);   /* SCB->CTR   */
+  unsigned int l1 = clidr & 7;
+
+  printf("cache: CLIDR=0x%08" PRIx32 " CTR=0x%08" PRIx32
+         " L1=%s%s%s\n", clidr, ctr,
+         (l1 & 1) != 0 ? "I" : "",
+         (l1 & 2) != 0 ? "D" : "",
+         l1 == 0 ? "none (uncached XIP from flash)" :
+         (l1 == 3 ? " (separate I and D)" : ""));
+}
+
 void board_late_initialize(void)
 {
   int ret = bk7258_bringup();
+
+  bk7258_report_cache();
 
   if (ret < 0)
     {

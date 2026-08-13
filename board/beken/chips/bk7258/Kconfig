@@ -9,6 +9,15 @@ config ARCH_CHIP_BK7258
 	select ARCH_HAVE_CUSTOM_VECTORS
 	select ARCH_HAVE_FPU
 	select ARCH_HAVE_MPU
+
+	# The AP core executes in place from flash at 0x02150000.  CLIDR reads
+	# 0x09200003 on this part, i.e. L1 has both an instruction and a data
+	# cache, so uncached instruction fetch out of QSPI is not a hardware
+	# limit -- it was only ever the absence of these two selects.  Without
+	# them CONFIG_ARMV8M_ICACHE cannot be set and a defconfig asking for it
+	# is silently dropped.
+	select ARMV8M_HAVE_ICACHE
+	select ARMV8M_HAVE_DCACHE
 	select ARM_HAVE_MPU_UNIFIED
 	select ARCH_HAVE_TRUSTZONE
 	select ARCH_IDLE_CUSTOM

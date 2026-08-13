@@ -13,6 +13,8 @@
 #include <nuttx/syslog/syslog.h>
 
 #include "arm_internal.h"
+#include <nuttx/cache.h>
+
 #include "mpu.h"
 #include "nvic.h"
 
@@ -143,6 +145,28 @@ bk7258_cpu_private_initialize(bool primary)
 
     mpu_reset();
     mpu_initialize(g_bk7258_mpu_regions, region_count, false, true);
+
+#ifdef CONFIG_ARMV8M_ICACHE
+    /* Turn the I-Cache on now that the MPU says the flash region is
+     * write-through cacheable.
+     *
+     * The AP executes in place from QSPI flash at 0x02150000, and nothing
+     * used to enable this: setting CONFIG_ARMV8M_ICACHE alone only compiles
+     * up_enable_icache() in, it does not call it, and every other ARMv8-M
+     * chip in the tree calls it from its own start code.  The cost of not
+     * doing so is one flash access per instruction fetch -- measured at
+     * roughly 1ms per drawn pixel in the expression renderer, about four
+     * orders of magnitude off the same code on a host, and unaffected by
+     * raising the core to 480MHz because the core was never the limit.
+     *
+     * CLIDR reads 0x09200003 on this part, so the cache is really there.
+     * Only the I-Cache is enabled: instruction fetch is read-only, so it
+     * needs no maintenance against the camera, panel and mailbox DMA that
+     * shares AP RAM (which the MPU keeps non-cacheable for that reason).
+     */
+
+    up_enable_icache();
+#endif
 
   }
 #endif
