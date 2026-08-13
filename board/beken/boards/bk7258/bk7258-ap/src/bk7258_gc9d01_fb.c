@@ -389,6 +389,21 @@ int bk7258_gc9d01_fb_fill(int display, uint16_t rgb565)
 
 int bk7258_gc9d01_fb_hello(int display)
 {
+  return bk7258_gc9d01_fb_hello_upto(display, GC9D01_XRES);
+}
+
+/****************************************************************************
+ * Name: bk7258_gc9d01_fb_hello_upto
+ *
+ * Description:
+ *   The greeting with everything at or beyond column limit left blank.  Used
+ *   by the boot animation to write the word out; limit >= GC9D01_XRES draws
+ *   the whole thing.
+ *
+ ****************************************************************************/
+
+int bk7258_gc9d01_fb_hello_upto(int display, int limit)
+{
   /* 'h', 'e', 'l', 'l', 'o' as 5x7 columns-in-bits, MSB leftmost. */
 
   static const uint8_t glyphs[5][GC9D01_HELLO_ROWS] =
@@ -463,7 +478,7 @@ int bk7258_gc9d01_fb_hello(int display)
                     {
                       int x = gx + col * GC9D01_HELLO_SCALE + sx;
 
-                      if (x >= 0 && x < GC9D01_XRES &&
+                      if (x >= 0 && x < GC9D01_XRES && x < limit &&
                           y >= 0 && y < GC9D01_YRES)
                         {
                           px[y * GC9D01_XRES + x] = GC9D01_HELLO_FG;
@@ -474,11 +489,81 @@ int bk7258_gc9d01_fb_hello(int display)
         }
     }
 
-  printf("gc9d01_fb[%d]: hello drawn (%dx%d at %d,%d)\n", display,
-         text_w * GC9D01_HELLO_SCALE,
-         GC9D01_HELLO_ROWS * GC9D01_HELLO_SCALE, x0, y0);
+  if (limit >= GC9D01_XRES)
+    {
+      printf("gc9d01_fb[%d]: hello drawn (%dx%d at %d,%d)\n", display,
+             text_w * GC9D01_HELLO_SCALE,
+             GC9D01_HELLO_ROWS * GC9D01_HELLO_SCALE, x0, y0);
+    }
 
   return gc9d01_push(priv);
+}
+
+/****************************************************************************
+ * Name: bk7258_gc9d01_fb_hello_animate
+ *
+ * Description:
+ *   Writes the greeting out left to right instead of making it appear.
+ *
+ *   displays is a bitmask of the panels to draw on; steps is how many column
+ *   bands the word is revealed in.  Every step pushes a full frame to each
+ *   selected panel, because the panel cannot take a partial update (see
+ *   gc9d01_updatearea()), so the cost is steps * panels * ~48ms and the
+ *   caller is expected to keep steps small.  The elapsed time is printed so a
+ *   change in this cost shows up in the boot log rather than as a vague
+ *   feeling that boot got slower.
+ *
+ *   This is a column reveal rather than the pen-stroke animation the 'hello'
+ *   shell command draws: that one needs a stroke font and lives with the
+ *   application, and bring-up has no way to start an application in this
+ *   configuration.
+ *
+ ****************************************************************************/
+
+int bk7258_gc9d01_fb_hello_animate(int displays, int steps)
+{
+  int text_w = 5 * (GC9D01_HELLO_COLS + 1) - 1;
+  int width = text_w * GC9D01_HELLO_SCALE;
+  int x0 = (GC9D01_XRES - width) / 2;
+  clock_t start = clock_systime_ticks();
+  int display;
+  int step;
+  int ret = -ENODEV;
+
+  if (steps < 1)
+    {
+      steps = 1;
+    }
+
+  for (step = 1; step <= steps; step++)
+    {
+      /* Reveal up to this column, rounded so the last step always completes
+       * the word even when width does not divide evenly.
+       */
+
+      int reveal = step >= steps ? GC9D01_XRES : x0 + (width * step) / steps;
+
+      for (display = 0; display < GC9D01_NDISPLAYS; display++)
+        {
+          if ((displays & (1 << display)) == 0)
+            {
+              continue;
+            }
+
+          if (bk7258_gc9d01_fb_hello_upto(display, reveal) >= 0)
+            {
+              ret = OK;
+            }
+        }
+    }
+
+  if (ret == OK)
+    {
+      printf("gc9d01_fb: greeting written in %lu ms (%d steps)\n",
+             (unsigned long)TICK2MSEC(clock_systime_ticks() - start), steps);
+    }
+
+  return ret;
 }
 
 /****************************************************************************

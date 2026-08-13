@@ -206,6 +206,7 @@ void board_late_initialize(void)
 
   {
     int display;
+    int registered = 0;
 
     for (display = 0; display < GC9D01_NDISPLAYS; display++)
       {
@@ -216,16 +217,30 @@ void board_late_initialize(void)
             continue;
           }
 
-        /* The panel has no readable ID register, so "the init sequence was
-         * sent" has never been evidence that it worked.  Draw a pattern
-         * once at boot: four quadrants with a black border makes both a
-         * byte-order mistake (wrong colours) and a stride mistake (sheared
-         * boundaries) visible at a glance.
-         */
+        registered |= 1 << display;
+        printf("fb: /dev/fb%d registered\n", display);
+      }
 
-        (void)bk7258_gc9d01_fb_hello(display);
-        printf("fb: /dev/fb%d registered, boot greeting pushed\n",
-               display);
+    /* Boot greeting, written out rather than simply appearing.
+     *
+     * The panel has no readable ID register, so "the init sequence was sent"
+     * has never been evidence that it worked; something has to be drawn at
+     * boot or a dead panel looks exactly like a working one.
+     *
+     * Both panels are revealed together, one column band per step, so the
+     * word is written left to right.  The cost is real -- each step pushes a
+     * full frame to both panels -- so it is bounded to a few hundred
+     * milliseconds and measured in the log.
+     *
+     * The pen-stroke version of this lives in the 'hello' shell command,
+     * which has a proper stroke font.  It cannot be reused here: it is an
+     * application, and this configuration builds neither exec_builtin() nor
+     * posix_spawn(), so bring-up has no way to start it.
+     */
+
+    if (registered != 0)
+      {
+        (void)bk7258_gc9d01_fb_hello_animate(registered, 8);
       }
   }
 #endif
