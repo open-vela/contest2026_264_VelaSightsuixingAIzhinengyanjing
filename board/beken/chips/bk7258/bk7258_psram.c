@@ -8,9 +8,12 @@
 
 #include <errno.h>
 #include <malloc.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
+#include <nuttx/kmalloc.h>
 #include <nuttx/mm/mm.h>
 #include <nuttx/mutex.h>
 
@@ -35,6 +38,17 @@ static const struct bk7258_psram_region g_pool_region[] =
   {"psram-display", BK7258_PSRAM_SLAB_DISPLAY_BASE,
    BK7258_PSRAM_SLAB_DISPLAY_SIZE},
 };
+
+#if CONFIG_MM_REGIONS > 1
+/* End of whatever the linker placed in PSRAM_SECTION, and the end of the
+ * region itself (bk7258-ap/scripts/ld.script).
+ */
+
+extern uint8_t __ap_psram_noinit_end[];
+extern uint8_t __ap_psram_section_end[];
+
+static bool g_system_region_added;
+#endif
 
 static mutex_t g_psram_lock = NXMUTEX_INITIALIZER;
 static struct mm_heap_s *g_psram_heap;
@@ -179,6 +193,46 @@ int bk7258_psram_initialize(void)
       ret = -ENOMEM;
       goto fail;
     }
+
+#if CONFIG_MM_REGIONS > 1
+  /* Hand the unused tail of PSRAM_SECTION to the system heap.
+   *
+   * Everything above lives in heaps this file owns, reachable only through
+   * bk7258_psram_alloc(); plain malloc() cannot see any of it.  That became a
+   * problem when the Wi-Fi stack landed: static RAM grew from 97KB to 182KB,
+   * the SRAM heap arena fell from 247KB to 158KB, and 'ai_agent' -- which
+   * needs about 200KB and a 32KB task stack -- could no longer be spawned.
+   * NSH reports that as "command not found", which is not a hint.
+   *
+   * The region added here is the part of PSRAM_SECTION that the linker did
+   * not fill, so placing data in .psram.data/.psram.bss/.psram.noinit keeps
+   * working and simply shrinks what the heap gets.
+   *
+   * It cannot be done from arm_addregion(): that runs while nx_start() sets
+   * the heap up, and PSRAM is not powered until the CP has answered the
+   * power-up request over the mailbox (bk7258_pm_pwc.c).  Registering it
+   * before then would hand out memory whose controller is still off.
+   *
+   * The memory is non-cacheable and slower than SRAM, and mm has no way to
+   * steer allocations, so some of what the agent puts here would rather have
+   * been in SRAM.  For a JSON/HTTP workload that is an acceptable trade
+   * against not running at all.
+   */
+
+  if (!g_system_region_added)
+    {
+      uintptr_t start = ((uintptr_t)__ap_psram_noinit_end + 7u) & ~(uintptr_t)7u;
+      uintptr_t end = (uintptr_t)__ap_psram_section_end;
+
+      if (end > start)
+        {
+          kmm_addregion((void *)start, end - start);
+          g_system_region_added = true;
+          printf("psram: %zu KB of PSRAM_SECTION added to the system heap\n",
+                 (size_t)((end - start) / 1024));
+        }
+    }
+#endif
 
   g_generation++;
   g_last_error = OK;
