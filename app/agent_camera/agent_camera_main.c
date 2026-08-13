@@ -139,6 +139,17 @@ struct agent_camera_s
  * Private Functions
  ****************************************************************************/
 
+/* Buffer count, settable with bufs=N.
+ *
+ * Exists because frames alternate good/short by buffer index on this board:
+ * with two buffers the ones landing in index 0 come back at about 13.6KB and
+ * do not decode, while index 1 gives a full ~43KB frame.  Being able to ask
+ * for a single buffer separates "the JPEG path is broken" from "re-arming the
+ * DMA onto the next buffer loses the head of the frame".
+ */
+
+static uint32_t g_nbufs = CAM_NUM_BUFFERS;
+
 static void agent_camera_usage(void)
 {
   printf("Usage: agent_camera [auto|low|high|<W>x<H>] "
@@ -610,6 +621,23 @@ static void agent_camera_print_b64(const uint8_t *data, size_t len)
       if ((i / 3) % 19 == 18)
         {
           fputc('\n', stdout);
+
+          /* Throttle every 2 lines (~114 payload bytes, ~3.5KB/s).
+           *
+           * The console is the CP's UART0 with the AP's output arriving over
+           * a mailbox bridge that holds 1024 bytes and flushes half-lines on
+           * a 50ms timer.  A 30KB burst of base64 overruns it and the host
+           * silently receives a truncated payload -- observed as 9111 of a
+           * declared 22703 bytes, with a length that still looks plausible.
+           * Pausing lets the bridge drain; the fnv1a line above is what
+           * proves whether it worked.
+           */
+
+          if (((i / 3) / 19) % 2 == 1)
+            {
+              fflush(stdout);
+              usleep(30000);
+            }
         }
     }
 
@@ -745,7 +773,7 @@ static int agent_camera_capture(struct agent_camera_s *cam,
   printf(" %dx%d sizeimage=%d\n", width, height, CAM_BUF_SIZE);
 
   memset(&req, 0, sizeof(req));
-  req.count  = CAM_NUM_BUFFERS;
+  req.count  = g_nbufs;
   req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   req.memory = V4L2_MEMORY_MMAP;
 
@@ -756,6 +784,7 @@ static int agent_camera_capture(struct agent_camera_s *cam,
     }
 
   cam->nbuffers = req.count < CAM_NUM_BUFFERS ? req.count : CAM_NUM_BUFFERS;
+  printf("agent_camera: %" PRIu32 " buffer(s) granted\n", cam->nbuffers);
 
   for (i = 0; i < cam->nbuffers; i++)
     {
@@ -963,6 +992,15 @@ int main(int argc, FAR char *argv[])
       else if (strcmp(arg, "strict") == 0)
         {
           negotiate = false;
+        }
+      else if (strncmp(arg, "bufs=", 5) == 0)
+        {
+          unsigned long v = strtoul(arg + 5, NULL, 10);
+
+          if (v >= 1 && v <= CAM_NUM_BUFFERS)
+            {
+              g_nbufs = (uint32_t)v;
+            }
         }
       else if (strcmp(arg, "b64") == 0)
         {
