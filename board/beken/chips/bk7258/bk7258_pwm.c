@@ -14,6 +14,7 @@
 
 #include "arm_internal.h"
 #include "bk7258_gpio.h"
+#include "bk7258_ldo33.h"
 
 #define BK7258_SYS_CLKSEL             0x44010020u
 #define BK7258_SYS_CLK_ENABLE         0x44010030u
@@ -44,13 +45,30 @@
 #define BK7258_PWM_CLOCK_HZ           26000000u
 
 #define BK7258_MOTOR_PWM_GPIO         9u
-#define BK7258_MOTOR_LDO_GPIO         52u
 #define BK7258_GPIO_FUNC_PWM3         1u
+
+/* The motor's supply enable is GPIO52 -- but that pad is LDO33_EN, and
+ * LDO_3V3 also feeds both GC9D01 panels' VDD and LEDA.  It must therefore
+ * never be driven directly from here: this driver used to own it as
+ * "BK7258_MOTOR_LDO_GPIO" and drove it low in setup() and stop(), which
+ * turned the panels off.  setup() runs earlier in bk7258_bringup() than the
+ * display does, so the boot case looked like "the display never worked";
+ * the stop() case is worse, because the panels go dark mid-run the first
+ * time anything buzzes the motor and stay dark until reboot -- with every
+ * display log line still reporting success (the panel has no readable ID
+ * register, see bk7258_gc9d01.c).
+ *
+ * 2026-08-10 made the rail a reference-counted shared resource
+ * (bk7258_ldo33.c) but only converted the display side.  This is the motor
+ * side: request the rail while the motor is driven, release it when it
+ * stops, and never force the pad low.
+ */
 
 struct bk7258_pwm_lowerhalf_s
 {
   const struct pwm_ops_s *ops;
   bool setup;
+  bool ldo_held;
 };
 
 void bk7258_gpio_output(unsigned int pin, bool value);
@@ -90,7 +108,6 @@ static int bk7258_pwm_setup(struct pwm_lowerhalf_s *dev)
   modifyreg32(BK7258_SYS_CLK_ENABLE, 0, BK7258_SYS_PWM0_CLK_ENABLE);
   putreg32(1, BK7258_PWM_CG_RESET);
   bk7258_gpio_set_function(BK7258_MOTOR_PWM_GPIO, BK7258_GPIO_FUNC_PWM3);
-  bk7258_gpio_output(BK7258_MOTOR_LDO_GPIO, false);
   priv->setup = true;
   leave_critical_section(flags);
 
@@ -150,22 +167,48 @@ static int bk7258_pwm_start(struct pwm_lowerhalf_s *dev,
                BK7258_PWM_CCMR_OC2M_TOGGLE));
   modifyreg32(BK7258_PWM_EDTR, 0, BK7258_PWM_EDTR_UG2);
   modifyreg32(BK7258_PWM_CR1, 0, BK7258_PWM_CR1_CEN2);
-  bk7258_gpio_write(BK7258_MOTOR_LDO_GPIO, duty != 0);
   leave_critical_section(flags);
+
+  /* Outside the critical section: the rail is shared with the panels, so
+   * take a reference while the motor is actually driven and give it back at
+   * zero duty.  Balanced through priv->ldo_held so a repeated start at the
+   * same duty cannot leak references and keep the rail pinned on.
+   */
+
+  if (duty != 0 && !priv->ldo_held)
+    {
+      bk7258_ldo33_request();
+      priv->ldo_held = true;
+    }
+  else if (duty == 0 && priv->ldo_held)
+    {
+      bk7258_ldo33_release();
+      priv->ldo_held = false;
+    }
 
   return OK;
 }
 
 static int bk7258_pwm_stop(struct pwm_lowerhalf_s *dev)
 {
+  struct bk7258_pwm_lowerhalf_s *priv =
+    (struct bk7258_pwm_lowerhalf_s *)dev;
   irqstate_t flags;
 
-  (void)dev;
   flags = enter_critical_section();
   modifyreg32(BK7258_PWM_CCMR, BK7258_PWM_CCMR_CH4E, 0);
   modifyreg32(BK7258_PWM_CR1, BK7258_PWM_CR1_CEN2, 0);
-  bk7258_gpio_write(BK7258_MOTOR_LDO_GPIO, false);
   leave_critical_section(flags);
+
+  /* Give the shared rail back instead of driving LDO33_EN low: the panels
+   * are on it too.  Release is a no-op when this driver holds no reference.
+   */
+
+  if (priv->ldo_held)
+    {
+      bk7258_ldo33_release();
+      priv->ldo_held = false;
+    }
 
   return OK;
 }
