@@ -1,0 +1,18 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config LVX_USE_DEMO_CONTEST2026_264_HELLO_SCREEN
+	bool "Pen-stroke boot greeting (hello)"
+	default n
+	depends on VIDEO_FB
+	---help---
+		Writes text onto the round panels one pen stroke at a time, the way
+		Apple's boot screen draws its greeting.  The text is an argument, so
+		'hello' can say anything the monoline stroke font covers (a-z, space
+		and a little punctuation); glyph size, pen width, reveal time and hold
+		time are arguments too.
+
+		Only the newly written stroke is drawn each frame, so the cost per
+		frame is one short stroke plus the panel push.
