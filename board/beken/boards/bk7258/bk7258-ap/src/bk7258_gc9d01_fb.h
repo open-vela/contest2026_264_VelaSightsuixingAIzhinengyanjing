@@ -86,13 +86,12 @@ int bk7258_gc9d01_fb_test_pattern(int display);
 
 int bk7258_gc9d01_fb_hello(int display);
 
-/* The same greeting with columns at or beyond limit left blank, and the boot
- * animation that walks limit across the word.  displays is a bitmask of
- * panels; every step pushes a full frame to each of them, so keep steps
- * small (see the implementation for the measured cost).
+/* The boot animation: writes the greeting one pen stroke at a time, using the
+ * same renderer and stroke font as the 'hello' shell command.  displays is a
+ * bitmask of panels; every step pushes a full frame to each of them, so the
+ * push sets the pace (see the implementation for the measured cost).
  */
 
-int bk7258_gc9d01_fb_hello_upto(int display, int limit);
 int bk7258_gc9d01_fb_hello_animate(int displays, int steps);
 
 #endif /* __BOARDS_BEKEN_BK7258_AP_SRC_BK7258_GC9D01_FB_H */

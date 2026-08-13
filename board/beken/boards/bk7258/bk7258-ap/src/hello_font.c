@@ -15,7 +15,7 @@
 
 #include <stddef.h>
 
-#include "hello_font.h"
+#include <arch/board/hello_font.h>
 
 /****************************************************************************
  * Private Data
@@ -212,6 +212,169 @@ OPS(g_space)
   {HS_END}
 };
 
+
+/* Uppercase.  Cap height runs from y=8 to the baseline at y=48, so a capital
+ * is 40 units tall against the lowercase bowl's 20.  Forms stay monoline and
+ * are drawn in the order a hand would draw them, same as the lowercase set.
+ *
+ * Arcs that bulge to the right run from 48 (up) through 0 (right) to 80
+ * (= 16, down); on screen, increasing angle is clockwise.
+ */
+
+OPS(g_A)
+{
+  {HS_MOVE, 2, 48}, {HS_LINE, 13, 8}, {HS_LINE, 24, 48},
+  {HS_MOVE, 7, 34}, {HS_LINE, 19, 34}, {HS_END}
+};
+
+OPS(g_B)
+{
+  {HS_MOVE, 4, 8}, {HS_LINE, 4, 48}, {HS_MOVE, 4, 8},
+  {HS_ARC, 4, 18, 10, 48, 80}, {HS_MOVE, 4, 28},
+  {HS_ARC, 4, 38, 10, 48, 80}, {HS_END}
+};
+
+OPS(g_C)
+{
+  {HS_ARC, 15, 28, 12, 12, 52}, {HS_END}
+};
+
+OPS(g_D)
+{
+  {HS_MOVE, 4, 8}, {HS_LINE, 4, 48}, {HS_MOVE, 4, 8},
+  {HS_ARC, 4, 28, 16, 48, 80}, {HS_END}
+};
+
+OPS(g_E)
+{
+  {HS_MOVE, 4, 8}, {HS_LINE, 4, 48}, {HS_MOVE, 4, 8}, {HS_LINE, 20, 8},
+  {HS_MOVE, 4, 28}, {HS_LINE, 16, 28}, {HS_MOVE, 4, 48}, {HS_LINE, 20, 48},
+  {HS_END}
+};
+
+OPS(g_F)
+{
+  {HS_MOVE, 4, 8}, {HS_LINE, 4, 48}, {HS_MOVE, 4, 8}, {HS_LINE, 20, 8},
+  {HS_MOVE, 4, 28}, {HS_LINE, 16, 28}, {HS_END}
+};
+
+OPS(g_G)
+{
+  {HS_ARC, 15, 28, 12, 12, 48}, {HS_MOVE, 27, 28}, {HS_LINE, 15, 28},
+  {HS_END}
+};
+
+OPS(g_H)
+{
+  {HS_MOVE, 4, 8}, {HS_LINE, 4, 48}, {HS_MOVE, 24, 8}, {HS_LINE, 24, 48},
+  {HS_MOVE, 4, 28}, {HS_LINE, 24, 28}, {HS_END}
+};
+
+OPS(g_I)
+{
+  {HS_MOVE, 4, 8}, {HS_LINE, 4, 48}, {HS_END}
+};
+
+OPS(g_J)
+{
+  {HS_MOVE, 16, 8}, {HS_LINE, 16, 40}, {HS_ARC, 8, 40, 8, 0, 28},
+  {HS_END}
+};
+
+OPS(g_K)
+{
+  {HS_MOVE, 4, 8}, {HS_LINE, 4, 48}, {HS_MOVE, 20, 8}, {HS_LINE, 4, 30},
+  {HS_MOVE, 9, 25}, {HS_LINE, 22, 48}, {HS_END}
+};
+
+OPS(g_L)
+{
+  {HS_MOVE, 4, 8}, {HS_LINE, 4, 48}, {HS_LINE, 20, 48}, {HS_END}
+};
+
+OPS(g_M)
+{
+  {HS_MOVE, 2, 48}, {HS_LINE, 2, 8}, {HS_LINE, 14, 30},
+  {HS_LINE, 26, 8}, {HS_LINE, 26, 48}, {HS_END}
+};
+
+OPS(g_N)
+{
+  {HS_MOVE, 2, 48}, {HS_LINE, 2, 8}, {HS_LINE, 22, 48},
+  {HS_LINE, 22, 8}, {HS_END}
+};
+
+OPS(g_O)
+{
+  {HS_ARC, 14, 28, 12, 0, -64}, {HS_END}
+};
+
+OPS(g_P)
+{
+  {HS_MOVE, 4, 8}, {HS_LINE, 4, 48}, {HS_MOVE, 4, 8},
+  {HS_ARC, 4, 19, 11, 48, 80}, {HS_END}
+};
+
+OPS(g_Q)
+{
+  {HS_ARC, 14, 28, 12, 0, -64}, {HS_MOVE, 18, 40}, {HS_LINE, 26, 50},
+  {HS_END}
+};
+
+OPS(g_R)
+{
+  {HS_MOVE, 4, 8}, {HS_LINE, 4, 48}, {HS_MOVE, 4, 8},
+  {HS_ARC, 4, 19, 11, 48, 80}, {HS_MOVE, 6, 30}, {HS_LINE, 22, 48},
+  {HS_END}
+};
+
+OPS(g_S)
+{
+  {HS_ARC, 13, 17, 9, 8, 44}, {HS_ARC, 13, 37, 9, 56, 28}, {HS_END}
+};
+
+OPS(g_T)
+{
+  {HS_MOVE, 2, 8}, {HS_LINE, 24, 8}, {HS_MOVE, 13, 8}, {HS_LINE, 13, 48},
+  {HS_END}
+};
+
+OPS(g_U)
+{
+  {HS_MOVE, 4, 8}, {HS_LINE, 4, 38}, {HS_MOVE, 4, 38},
+  {HS_ARC, 14, 38, 10, 32, 0}, {HS_MOVE, 24, 8}, {HS_LINE, 24, 48},
+  {HS_END}
+};
+
+OPS(g_V)
+{
+  {HS_MOVE, 2, 8}, {HS_LINE, 13, 48}, {HS_LINE, 24, 8}, {HS_END}
+};
+
+OPS(g_W)
+{
+  {HS_MOVE, 2, 8}, {HS_LINE, 8, 48}, {HS_LINE, 15, 20},
+  {HS_LINE, 22, 48}, {HS_LINE, 28, 8}, {HS_END}
+};
+
+OPS(g_X)
+{
+  {HS_MOVE, 2, 8}, {HS_LINE, 22, 48}, {HS_MOVE, 22, 8}, {HS_LINE, 2, 48},
+  {HS_END}
+};
+
+OPS(g_Y)
+{
+  {HS_MOVE, 2, 8}, {HS_LINE, 13, 28}, {HS_LINE, 24, 8},
+  {HS_MOVE, 13, 28}, {HS_LINE, 13, 48}, {HS_END}
+};
+
+OPS(g_Z)
+{
+  {HS_MOVE, 2, 8}, {HS_LINE, 22, 8}, {HS_LINE, 2, 48}, {HS_LINE, 22, 48},
+  {HS_END}
+};
+
 static const struct hs_glyph_s g_glyphs[] =
 {
   {'a', 28, g_a}, {'b', 28, g_b}, {'c', 26, g_c}, {'d', 28, g_d},
@@ -222,7 +385,14 @@ static const struct hs_glyph_s g_glyphs[] =
   {'u', 24, g_u}, {'v', 24, g_v}, {'w', 30, g_w}, {'x', 22, g_x},
   {'y', 24, g_y}, {'z', 22, g_z},
   {'!', 10, g_excl}, {',', 8, g_comma}, {'.', 8, g_period},
-  {'-', 20, g_dash}, {' ', 14, g_space}
+  {'-', 20, g_dash}, {' ', 14, g_space},
+  {'A', 28, g_A}, {'B', 26, g_B}, {'C', 30, g_C}, {'D', 32, g_D},
+  {'E', 24, g_E}, {'F', 24, g_F}, {'G', 32, g_G}, {'H', 30, g_H},
+  {'I', 10, g_I}, {'J', 22, g_J}, {'K', 26, g_K}, {'L', 24, g_L},
+  {'M', 30, g_M}, {'N', 26, g_N}, {'O', 30, g_O}, {'P', 26, g_P},
+  {'Q', 30, g_Q}, {'R', 26, g_R}, {'S', 26, g_S}, {'T', 28, g_T},
+  {'U', 30, g_U}, {'V', 28, g_V}, {'W', 32, g_W}, {'X', 26, g_X},
+  {'Y', 28, g_Y}, {'Z', 26, g_Z}
 };
 
 #define NGLYPHS ((int)(sizeof(g_glyphs) / sizeof(g_glyphs[0])))
@@ -235,13 +405,30 @@ const struct hs_glyph_s *hs_font_lookup(char ch)
 {
   int i;
 
-  /* Uppercase folds to lowercase: the font is monoline and single-case, and
-   * silently dropping 'H' from "Hello" would be worse than drawing 'h'.
+  for (i = 0; i < NGLYPHS; i++)
+    {
+      if (g_glyphs[i].ch == ch)
+        {
+          return &g_glyphs[i];
+        }
+    }
+
+  /* Fall back to the other case rather than dropping the character: the table
+   * carries both cases now, but a missing glyph should still draw something
+   * recognisable instead of leaving a hole in the word.
    */
 
   if (ch >= 'A' && ch <= 'Z')
     {
       ch = (char)(ch - 'A' + 'a');
+    }
+  else if (ch >= 'a' && ch <= 'z')
+    {
+      ch = (char)(ch - 'a' + 'A');
+    }
+  else
+    {
+      return NULL;
     }
 
   for (i = 0; i < NGLYPHS; i++)

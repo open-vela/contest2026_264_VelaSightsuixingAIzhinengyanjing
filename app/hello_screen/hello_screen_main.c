@@ -37,7 +37,7 @@
 
 #include <nuttx/video/fb.h>
 
-#include "hello_paint.h"
+#include <arch/board/hello_paint.h>
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -82,33 +82,6 @@ static uint32_t hs_now_ms(void)
 
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-}
-
-/****************************************************************************
- * Name: hs_ease
- *
- * Description:
- *   Smoothstep on 0..1000.  A constant pen speed looks mechanical and a
- *   quadratic ease-out starts too abruptly; smoothstep accelerates into the
- *   stroke and settles out of it, which is what reads as a hand writing.
- *
- ****************************************************************************/
-
-static int32_t hs_ease(int32_t permille)
-{
-  int64_t x = permille;
-
-  if (x < 0)
-    {
-      x = 0;
-    }
-
-  if (x > 1000)
-    {
-      x = 1000;
-    }
-
-  return (int32_t)((x * x * (3000 - 2 * x)) / 1000000);
 }
 
 static int hs_open_panels(struct hs_panel_s *p, int want, int *npanels)

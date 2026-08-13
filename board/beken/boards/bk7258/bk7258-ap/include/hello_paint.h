@@ -48,6 +48,14 @@ struct hs_style_s
 int32_t hs_measure(const char *text, const struct hs_style_s *st,
                    int32_t *width16);
 
+/* Smoothstep on 0..1000, used to pace the reveal.  Exposed so the boot
+ * animation in the panel driver and the shell command move the pen the same
+ * way: a constant speed looks mechanical and a quadratic ease-out starts too
+ * abruptly.
+ */
+
+int32_t hs_ease(int32_t permille);
+
 /* Fill the whole canvas with st->bg. */
 
 void hs_clear(uint8_t *buf, size_t stride, int w, int h,

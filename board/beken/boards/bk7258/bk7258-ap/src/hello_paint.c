@@ -16,8 +16,8 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "hello_font.h"
-#include "hello_paint.h"
+#include <arch/board/hello_font.h>
+#include <arch/board/hello_paint.h>
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -398,6 +398,23 @@ static int32_t hs_walk(struct hs_canvas_s *cv, const char *text,
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
+
+int32_t hs_ease(int32_t permille)
+{
+  int64_t x = permille;
+
+  if (x < 0)
+    {
+      x = 0;
+    }
+
+  if (x > 1000)
+    {
+      x = 1000;
+    }
+
+  return (int32_t)((x * x * (3000 - 2 * x)) / 1000000);
+}
 
 int32_t hs_measure(const char *text, const struct hs_style_s *st,
                    int32_t *width16)

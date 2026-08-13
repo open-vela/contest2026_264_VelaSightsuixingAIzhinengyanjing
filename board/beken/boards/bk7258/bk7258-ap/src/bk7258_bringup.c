@@ -240,7 +240,7 @@ void board_late_initialize(void)
 
     if (registered != 0)
       {
-        (void)bk7258_gc9d01_fb_hello_animate(registered, 8);
+        (void)bk7258_gc9d01_fb_hello_animate(registered, 20);
       }
   }
 #endif

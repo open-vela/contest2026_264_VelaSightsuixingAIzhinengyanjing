@@ -53,23 +53,14 @@
 #include <string.h>
 #include <errno.h>
 
+#include <arch/board/hello_paint.h>
+
 #include "bk7258_qspi.h"
 #include "bk7258_gc9d01_fb.h"
 
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
-
-/* Boot greeting.  Cyan on black to match the expression palette that
- * camera_preview draws (see app/camera_preview/preview_face.c), so the boot
- * screen and the faces look like they belong to the same device.
- */
-
-#define GC9D01_HELLO_COLS   5
-#define GC9D01_HELLO_ROWS   7
-#define GC9D01_HELLO_SCALE  3
-#define GC9D01_HELLO_FG     0x07ff
-#define GC9D01_HELLO_BG     0x0000
 
 /****************************************************************************
  * Private Types
@@ -369,71 +360,81 @@ int bk7258_gc9d01_fb_fill(int display, uint16_t rgb565)
 }
 
 /****************************************************************************
+ * Name: greeting_style
+ *
+ * Description:
+ *   The pen and layout the boot greeting is drawn with.  These are the same
+ *   numbers as 'hello em=52 thick=4', so the boot animation and the shell
+ *   command produce the same strokes -- they now share one renderer
+ *   (hello_paint.c) and one stroke font (hello_font.c) instead of the panel
+ *   driver carrying its own 5x7 bitmap copy of the word.
+ *
+ ****************************************************************************/
+
+#define GC9D01_GREETING_TEXT   "hello vela"
+#define GC9D01_GREETING_EM     52
+#define GC9D01_GREETING_THICK  4
+#define GC9D01_GREETING_STEPS  20
+
+static int32_t greeting_style(FAR struct hs_style_s *st)
+{
+  int32_t budget = (GC9D01_XRES * 16 * 85) / 100;
+  int32_t width = 0;
+  int32_t total;
+
+  memset(st, 0, sizeof(*st));
+  st->fg      = 0xffff;
+  st->bg      = 0x0000;
+  st->em16    = GC9D01_GREETING_EM * 16;
+  st->thick16 = GC9D01_GREETING_THICK * 16;
+
+  /* Baseline is nudged below the centre by the same fraction the command
+   * uses, so the word sits optically centred rather than mathematically.
+   */
+
+  st->baseline16 = (GC9D01_YRES * 16) / 2 + (st->em16 * 10) / 64;
+  total = hs_measure(GC9D01_GREETING_TEXT, st, &width);
+
+  /* Auto-fit, same 85% chord budget as the shell command.  The glass is
+   * round, so the usable width is a chord rather than the full 160 pixels,
+   * and GC9D01_GREETING_EM is the requested size rather than a promise: at
+   * em 52 "hello vela" is about 180 pixels wide and would lose its first
+   * letter off the left edge, which looks like a font bug rather than an
+   * overflow.
+   */
+
+  if (width > budget && width > 0)
+    {
+      st->em16 = (st->em16 * budget) / width;
+      st->thick16 = (st->thick16 * budget) / width;
+
+      if (st->thick16 < 2 * 16)
+        {
+          st->thick16 = 2 * 16;
+        }
+
+      st->baseline16 = (GC9D01_YRES * 16) / 2 + (st->em16 * 10) / 64;
+      total = hs_measure(GC9D01_GREETING_TEXT, st, &width);
+    }
+
+  st->cx16 = (GC9D01_XRES * 16 - width) / 2;
+  return total;
+}
+
+/****************************************************************************
  * Name: bk7258_gc9d01_fb_hello
  *
  * Description:
- *   Boot greeting: the word "hello" centred on the panel.
- *
- *   This replaced the four-quadrant test pattern as the boot screen.  The
- *   pattern is still here and still worth having -- it is the thing that
- *   makes a byte-order or stride mistake obvious by eye -- but it is a
- *   diagnostic, not something to greet a user with.  It is reachable from
- *   the shell as 'camera_preview pattern', which draws the same quadrants
- *   and border through the framebuffer.
- *
- *   The glyphs are a 5x7 bitmap scaled by 3, so the word is 87x21 pixels
- *   and fits inside the round glass with room to spare: the top-left corner
- *   lands 45 pixels from the centre against a visible radius of 80.
+ *   The greeting, complete, in one shot.  Kept for callers that cannot
+ *   animate; the boot path uses bk7258_gc9d01_fb_hello_animate().
  *
  ****************************************************************************/
 
 int bk7258_gc9d01_fb_hello(int display)
 {
-  return bk7258_gc9d01_fb_hello_upto(display, GC9D01_XRES);
-}
-
-/****************************************************************************
- * Name: bk7258_gc9d01_fb_hello_upto
- *
- * Description:
- *   The greeting with everything at or beyond column limit left blank.  Used
- *   by the boot animation to write the word out; limit >= GC9D01_XRES draws
- *   the whole thing.
- *
- ****************************************************************************/
-
-int bk7258_gc9d01_fb_hello_upto(int display, int limit)
-{
-  /* 'h', 'e', 'l', 'l', 'o' as 5x7 columns-in-bits, MSB leftmost. */
-
-  static const uint8_t glyphs[5][GC9D01_HELLO_ROWS] =
-  {
-    {
-      0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x11
-    },                                              /* h */
-    {
-      0x00, 0x00, 0x0e, 0x11, 0x1f, 0x10, 0x0e
-    },                                              /* e */
-    {
-      0x0c, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0e
-    },                                              /* l */
-    {
-      0x0c, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0e
-    },                                              /* l */
-    {
-      0x00, 0x00, 0x0e, 0x11, 0x11, 0x11, 0x0e
-    }                                               /* o */
-  };
-
   FAR struct gc9d01_fb_s *priv;
-  FAR uint16_t *px;
-  int text_w = 5 * (GC9D01_HELLO_COLS + 1) - 1;
-  int x0 = (GC9D01_XRES - text_w * GC9D01_HELLO_SCALE) / 2;
-  int y0 = (GC9D01_YRES - GC9D01_HELLO_ROWS * GC9D01_HELLO_SCALE) / 2;
-  int i;
-  int g;
-  int row;
-  int col;
+  struct hs_style_s st;
+  int32_t total;
 
   if (display < 0 || display >= GC9D01_NDISPLAYS)
     {
@@ -441,60 +442,16 @@ int bk7258_gc9d01_fb_hello_upto(int display, int limit)
     }
 
   priv = &g_gc9d01_fb[display];
-  px = (FAR uint16_t *)priv->fbmem;
-
-  if (px == NULL)
+  if (priv->fbmem == NULL)
     {
       return -ENODEV;
     }
 
-  for (i = 0; i < GC9D01_XRES * GC9D01_YRES; i++)
-    {
-      px[i] = GC9D01_HELLO_BG;
-    }
+  total = greeting_style(&st);
 
-  for (g = 0; g < 5; g++)
-    {
-      int gx = x0 + g * (GC9D01_HELLO_COLS + 1) * GC9D01_HELLO_SCALE;
-
-      for (row = 0; row < GC9D01_HELLO_ROWS; row++)
-        {
-          for (col = 0; col < GC9D01_HELLO_COLS; col++)
-            {
-              int sx;
-              int sy;
-
-              if ((glyphs[g][row] &
-                   (1u << (GC9D01_HELLO_COLS - 1 - col))) == 0)
-                {
-                  continue;
-                }
-
-              for (sy = 0; sy < GC9D01_HELLO_SCALE; sy++)
-                {
-                  int y = y0 + row * GC9D01_HELLO_SCALE + sy;
-
-                  for (sx = 0; sx < GC9D01_HELLO_SCALE; sx++)
-                    {
-                      int x = gx + col * GC9D01_HELLO_SCALE + sx;
-
-                      if (x >= 0 && x < GC9D01_XRES && x < limit &&
-                          y >= 0 && y < GC9D01_YRES)
-                        {
-                          px[y * GC9D01_XRES + x] = GC9D01_HELLO_FG;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-  if (limit >= GC9D01_XRES)
-    {
-      printf("gc9d01_fb[%d]: hello drawn (%dx%d at %d,%d)\n", display,
-             text_w * GC9D01_HELLO_SCALE,
-             GC9D01_HELLO_ROWS * GC9D01_HELLO_SCALE, x0, y0);
-    }
+  hs_clear(priv->fbmem, GC9D01_STRIDE, GC9D01_XRES, GC9D01_YRES, &st);
+  hs_stroke(priv->fbmem, GC9D01_STRIDE, GC9D01_XRES, GC9D01_YRES,
+            GC9D01_GREETING_TEXT, &st, 0, total);
 
   return gc9d01_push(priv);
 }
@@ -503,67 +460,104 @@ int bk7258_gc9d01_fb_hello_upto(int display, int limit)
  * Name: bk7258_gc9d01_fb_hello_animate
  *
  * Description:
- *   Writes the greeting out left to right instead of making it appear.
+ *   Writes the greeting one pen stroke at a time, all selected panels
+ *   advancing together, which is what the 'hello' shell command does.
  *
- *   displays is a bitmask of the panels to draw on; steps is how many column
- *   bands the word is revealed in.  Every step pushes a full frame to each
- *   selected panel, because the panel cannot take a partial update (see
- *   gc9d01_updatearea()), so the cost is steps * panels * ~48ms and the
- *   caller is expected to keep steps small.  The elapsed time is printed so a
- *   change in this cost shows up in the boot log rather than as a vague
- *   feeling that boot got slower.
+ *   displays is a bitmask of panels.  Only the newly written stroke is drawn
+ *   each step -- the pen adds ink and never repaints -- so a step costs one
+ *   short stroke plus a full-frame push per panel.  The panel takes no
+ *   partial update (see gc9d01_updatearea()), so the push dominates and sets
+ *   the pace; the elapsed time is reported to keep that cost visible in the
+ *   boot log.
  *
- *   This is a column reveal rather than the pen-stroke animation the 'hello'
- *   shell command draws: that one needs a stroke font and lives with the
- *   application, and bring-up has no way to start an application in this
- *   configuration.
+ *   Reusing the command's renderer was not possible while it lived with the
+ *   application: bring-up cannot start an application in this configuration
+ *   (neither exec_builtin() nor posix_spawn() is built), which showed up as
+ *   an undefined reference at link time.  Moving the renderer to the board is
+ *   what made one implementation serve both.
  *
  ****************************************************************************/
 
 int bk7258_gc9d01_fb_hello_animate(int displays, int steps)
 {
-  int text_w = 5 * (GC9D01_HELLO_COLS + 1) - 1;
-  int width = text_w * GC9D01_HELLO_SCALE;
-  int x0 = (GC9D01_XRES - width) / 2;
+  struct hs_style_s st;
   clock_t start = clock_systime_ticks();
+  int32_t total;
+  int32_t drawn = 0;
   int display;
   int step;
-  int ret = -ENODEV;
+  int drew = 0;
 
   if (steps < 1)
     {
       steps = 1;
     }
 
+  total = greeting_style(&st);
+  if (total <= 0)
+    {
+      return -EINVAL;
+    }
+
+  for (display = 0; display < GC9D01_NDISPLAYS; display++)
+    {
+      if ((displays & (1 << display)) != 0 &&
+          g_gc9d01_fb[display].fbmem != NULL)
+        {
+          hs_clear(g_gc9d01_fb[display].fbmem, GC9D01_STRIDE,
+                   GC9D01_XRES, GC9D01_YRES, &st);
+          (void)gc9d01_push(&g_gc9d01_fb[display]);
+          drew = 1;
+        }
+    }
+
+  if (drew == 0)
+    {
+      return -ENODEV;
+    }
+
   for (step = 1; step <= steps; step++)
     {
-      /* Reveal up to this column, rounded so the last step always completes
-       * the word even when width does not divide evenly.
+      /* Same smoothstep the command uses, so the pen accelerates into the
+       * stroke and settles out of it rather than moving at a constant rate.
        */
 
-      int reveal = step >= steps ? GC9D01_XRES : x0 + (width * step) / steps;
+      int32_t target = (int32_t)(((int64_t)total *
+                        hs_ease((step * 1000) / steps)) / 1000);
+
+      if (step >= steps)
+        {
+          target = total;
+        }
+
+      if (target <= drawn)
+        {
+          continue;
+        }
 
       for (display = 0; display < GC9D01_NDISPLAYS; display++)
         {
-          if ((displays & (1 << display)) == 0)
+          if ((displays & (1 << display)) == 0 ||
+              g_gc9d01_fb[display].fbmem == NULL)
             {
               continue;
             }
 
-          if (bk7258_gc9d01_fb_hello_upto(display, reveal) >= 0)
-            {
-              ret = OK;
-            }
+          hs_stroke(g_gc9d01_fb[display].fbmem, GC9D01_STRIDE,
+                    GC9D01_XRES, GC9D01_YRES, GC9D01_GREETING_TEXT, &st,
+                    drawn, target);
+          (void)gc9d01_push(&g_gc9d01_fb[display]);
         }
+
+      drawn = target;
     }
 
-  if (ret == OK)
-    {
-      printf("gc9d01_fb: greeting written in %lu ms (%d steps)\n",
-             (unsigned long)TICK2MSEC(clock_systime_ticks() - start), steps);
-    }
+  printf("gc9d01_fb: greeting written in %lu ms (%d steps, %d px path, "
+         "em %d, pen %d)\n",
+         (unsigned long)TICK2MSEC(clock_systime_ticks() - start), steps,
+         (int)(total / 16), (int)(st.em16 / 16), (int)(st.thick16 / 16));
 
-  return ret;
+  return OK;
 }
 
 /****************************************************************************
