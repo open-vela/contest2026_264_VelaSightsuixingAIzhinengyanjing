@@ -178,6 +178,8 @@
  ****************************************************************************/
 
 static bk7258_yuv_buf_frame_cb_t g_frame_cb;
+static bk7258_yuv_buf_frame_cb_t g_vsync_cb;
+static FAR void *g_vsync_cb_arg;
 static FAR void *g_frame_cb_arg;
 static uint32_t g_frame_buf_addr;
 
@@ -226,6 +228,17 @@ static int bk7258_yuv_buf_isr(int irq, FAR void *context, FAR void *arg)
   if ((status & YUV_BUF_INT_VSYNC_NEGE) != 0)
     {
       g_vsync_count++;
+
+      /* A frame boundary.  The JPEG path uses this to recover from an
+       * encoder that gave up mid-frame, which is why the callback exists
+       * separately from the frame-done one: in JPEG mode no frame-done
+       * event ever arrives.
+       */
+
+      if (g_vsync_cb != NULL)
+        {
+          g_vsync_cb(g_vsync_cb_arg);
+        }
     }
 
   if ((status & YUV_BUF_INT_ERRORS) != 0)
@@ -474,6 +487,66 @@ void bk7258_yuv_buf_start(void)
   putreg32(YUV_BUF_INT_ALL, YUV_BUF_INT_STATUS);
   putreg32(YUV_BUF_INT_EN_YUV_MODE, YUV_BUF_INT_EN);
   modifyreg32(YUV_BUF_CTRL, YUV_BUF_CTRL_H264_MODE, YUV_BUF_CTRL_YUV_MODE);
+}
+
+/****************************************************************************
+ * Name: bk7258_yuv_buf_start_jpeg
+ *
+ * Description:
+ *   Hands the sensor stream to the JPEG encoder instead of writing frames
+ *   to memory.
+ *
+ *   The difference from bk7258_yuv_buf_start() is that yuv_mode must be
+ *   *off*: this module's own frame writer and the encoder are two consumers
+ *   of the same pixel stream, and the reference selects between them rather
+ *   than running both (yuv_buf_hal_start_jpeg_mode() disables yuv_mode and
+ *   h264_mode, then enables the JPEG block).  Leaving yuv_mode on is the
+ *   obvious mistake here, and it would not look like a mode error: the
+ *   module would keep filling the frame buffer while the encoder also ran.
+ *
+ *   The frame interrupts stay enabled: VSYNC negedge is still the marker for
+ *   "sensor is alive", which the capture watchdog needs.  Completion of an
+ *   encoded frame is reported by the JPEG block's own EOF interrupt, not
+ *   from here.
+ *
+ ****************************************************************************/
+
+void bk7258_yuv_buf_set_vsync_callback(bk7258_yuv_buf_frame_cb_t cb,
+                                      FAR void *arg)
+{
+  g_vsync_cb_arg = arg;
+  g_vsync_cb = cb;
+}
+
+/****************************************************************************
+ * Name: bk7258_yuv_buf_soft_reset
+ *
+ * Description:
+ *   Pulses the module's global soft reset, leaving it released with the
+ *   clock gate still bypassed.  soft_reset is low-active: 0 holds the
+ *   module in reset, so the pulse is 0 then 1 (see bk7258_yuv_buf_init()
+ *   for the evidence trail on that polarity -- getting it backwards is what
+ *   three earlier sessions misdiagnosed).
+ *
+ *   Print-free: the JPEG error recovery calls this from interrupt context
+ *   (reference: bk_yuv_buf_soft_reset() inside
+ *   dvp_camera_reset_hardware_modules_handler()).
+ *
+ ****************************************************************************/
+
+void bk7258_yuv_buf_soft_reset(void)
+{
+  putreg32(0, YUV_BUF_GLOBAL_CTRL);
+  putreg32(YUV_BUF_GLOBAL_CTRL_SOFT_RESET |
+           YUV_BUF_GLOBAL_CTRL_CLK_GATE_BYPASS, YUV_BUF_GLOBAL_CTRL);
+}
+
+void bk7258_yuv_buf_start_jpeg(void)
+{
+  putreg32(YUV_BUF_INT_ALL, YUV_BUF_INT_STATUS);
+  putreg32(YUV_BUF_INT_EN_YUV_MODE, YUV_BUF_INT_EN);
+  modifyreg32(YUV_BUF_CTRL,
+              YUV_BUF_CTRL_YUV_MODE | YUV_BUF_CTRL_H264_MODE, 0);
 }
 
 void bk7258_yuv_buf_stop(void)

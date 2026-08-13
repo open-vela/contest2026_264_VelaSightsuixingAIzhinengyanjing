@@ -7,23 +7,83 @@
 #ifndef __BOARDS_BEKEN_BK7258_AP_SRC_BK7258_GC9D01_FB_H
 #define __BOARDS_BEKEN_BK7258_AP_SRC_BK7258_GC9D01_FB_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
-/* Panel reset, QSPI bring-up and the GC9D01 initialization command
- * sequence.  Implemented in bk7258_gc9d01.c, which owns the command table.
- * Returns OK or a negated errno.
+/* Number of panels this board can drive.  Both GC9D01 footprints (sheet
+ * 5/6's LCD1 "单屏" and LCD2 "双屏") get a framebuffer, exposed as
+ * /dev/fb0 and /dev/fb1.  display 0 is the QSPI1 panel, which is the one
+ * that was brought up first -- keeping it at index 0 means /dev/fb0 still
+ * refers to the same physical screen as before dual-panel support.
  */
 
-int bk7258_gc9d01_panel_init(void);
+#define GC9D01_NDISPLAYS 2
 
-/* Bring-up helpers: fill the framebuffer with one colour, or draw a
- * four-quadrant test pattern, and push it to the panel.  These exist
- * because GC9D01 has no readable ID register -- until something is
- * visible on the glass there is no evidence the init sequence took
- * effect.
+/* Panel geometry, from the vendor's own device table
+ * (bk_avdk_smp/ap/components/bk_peripheral/src/lcd/spi/lcd_spi_gc9d01.c:
+ * lcd_device_gc9d01 = { .width = 160, .height = 160 }).  One RGB565 frame
+ * is 160*160*2 = 51200 bytes.
  */
 
-int bk7258_gc9d01_fb_fill(uint16_t rgb565);
-int bk7258_gc9d01_fb_test_pattern(void);
+#define GC9D01_XRES   160
+#define GC9D01_YRES   160
+#define GC9D01_BPP    16
+#define GC9D01_STRIDE (GC9D01_XRES * 2)
+#define GC9D01_FBLEN  (GC9D01_STRIDE * GC9D01_YRES)
+
+/* Column/row address set, standard MIPI DCS opcodes the GC9 series
+ * follows.  RAMWR (0x2C) is issued by the bus driver as part of the frame
+ * push, so it is not needed here.
+ */
+
+#define GC9D01_CMD_CASET 0x2A
+#define GC9D01_CMD_RASET 0x2B
+
+/* Rail power-up (once, shared), panel reset, MCU-SPI bring-up and the
+ * GC9D01 initialization command sequence for one display, ending with the
+ * full-panel drawing window and the backlight on (also shared).
+ * Implemented in bk7258_gc9d01.c, which owns the command table.  Returns OK
+ * or a negated errno.
+ *
+ * Note that a missing panel cannot be detected: GC9D01 has no readable ID
+ * register, so an unpopulated footprint accepts the whole sequence exactly
+ * as a working one does.
+ */
+
+int bk7258_gc9d01_panel_init(int display);
+
+/* Which LCD bus a display is wired to; negative on a bad index. */
+
+int bk7258_gc9d01_bus(int display);
+
+/* Set the drawing window to the whole panel.  Exposed because the
+ * framebuffer's update path re-asserts it before every frame, and the
+ * pin/opcode knowledge belongs to the panel driver.
+ */
+
+bool bk7258_gc9d01_window_full(int display);
+
+/* Backlight (LCD_BL_PWM -> Q3 -> LEDK) on/off.  Shared by both panels --
+ * there is one switch for the whole board.
+ */
+
+void bk7258_gc9d01_backlight(bool on);
+
+/* Bring-up helpers: fill one display's framebuffer with a solid colour, or
+ * draw a four-quadrant test pattern, and push it.  These exist because
+ * GC9D01 has no readable ID register -- until something is visible on the
+ * glass there is no evidence the init sequence took effect.
+ */
+
+int bk7258_gc9d01_fb_fill(int display, uint16_t rgb565);
+int bk7258_gc9d01_fb_test_pattern(int display);
+
+/* Boot greeting: the word "hello" centred on the panel.  This is what
+ * bk7258_bringup() pushes now; the quadrant pattern above stays because it is
+ * the diagnostic that makes a byte-order or stride error visible, and it is
+ * still reachable from the shell as 'camera_preview pattern'.
+ */
+
+int bk7258_gc9d01_fb_hello(int display);
 
 #endif /* __BOARDS_BEKEN_BK7258_AP_SRC_BK7258_GC9D01_FB_H */

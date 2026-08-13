@@ -1,53 +1,67 @@
 /****************************************************************************
  * board/beken/boards/bk7258/bk7258-ap/src/bk7258_gc9d01.c
  *
- * GC9D01 160x160 QSPI LCD panel bring-up.  Init command table copied from
+ * GC9D01 160x160 round LCD bring-up (4-wire MCU SPI), two panels.
+ *
+ * Init command table copied verbatim -- all 50 entries -- from
  * bk_avdk_smp release/v3.1.1
- * ap/components/bk_peripheral/src/lcd/spi/lcd_spi_gc9d01.c (gc9d01_init_cmds,
- * 50 entries total).  Only the init sequence is ported; DMA-backed
- * full-frame refresh is out of scope for this task.
+ * ap/components/bk_peripheral/src/lcd/spi/lcd_spi_gc9d01.c
+ * (gc9d01_init_cmds).  The bring-up sequence follows bk_lcd_spi_init() in
+ * ap/middleware/driver/lcd/lcd_spi_driver.c.
  *
- * Command table traceability: bk7258_qspi0_send_cmd() only supports up to
- * 4 data bytes per command (see bk7258_qspi.h), which hard-blocks porting
- * 11 of the 50 upstream entries whose data_len exceeds 4:
- *   0x74(7) 0x64(6) 0x65(6) 0x6C(7) 0x6E(32) 0x70(6) 0xF0(6) 0xF2(6)
- *   0xF1(6) 0xF3(6), plus the special 0x00/data_len=0xFF delay marker
- *   (handled separately below, not a real QSPI command).
- * The remaining 9 omitted entries (0x98, 0xB5, 0x60, 0x61, 0x6A, 0x93,
- * 0x71, 0x91, 0x34) all fit within the 4-byte limit and were dropped in
- * an earlier revision of this file without a stated reason; upstream
- * documents them as gamma/porch/timing fine-tuning registers that are not
- * required to reach a functional display state, but this has not been
- * independently confirmed against the GC9D01 datasheet.  If the panel
- * shows visible artifacts once full-frame refresh is implemented, restore
- * these 9 entries first as they are the cheapest to re-add (all <= 4
- * bytes, no interface change needed).
+ * ---------------------------------------------------------------------
+ * Dual panel
+ * ---------------------------------------------------------------------
+ * The board carries two GC9D01 footprints (sheet 5/6: LCD1 labelled 单屏,
+ * LCD2 labelled 双屏) and both can be populated -- the two "eyes" of the
+ * product.  Each has its own QSPI controller, D/C and RESET; they share the
+ * 3.3V rail and the backlight.  Pin evidence and the independent
+ * corroboration from bk_solution_ai are in bk7258_qspi.c's header.
  *
- * One functional gap from an earlier revision of this file has been
- * fixed here: upstream sends {0x00, {0x78}, 0xFF} between the Sleep Out
- * (0x11) and Display On (0x29) commands.  data_len == 0xFF is not a real
- * QSPI command; per bk_lcd_qspi_init() in
- * ap/middleware/driver/lcd/lcd_qspi_driver.c, it is a driver-level marker
- * meaning "delay data[0] milliseconds" (0x78 = 120ms).  This delay is
- * restored below as an explicit up_udelay() call between the two
- * commands, since bk7258_qspi0_send_cmd() has no equivalent marker
- * convention.
+ *   display 0 -> bus 1 (QSPI1), D/C GPIO5, RESET GPIO45   [LCD1 footprint]
+ *   display 1 -> bus 0 (QSPI0), D/C GPIO7, RESET GPIO6    [LCD2 footprint]
  *
- * Bus/reset-pin correction (2026-07-31): the very first init command
- * (0xFE) was timing out on real hardware.  Root cause was two wrong
- * hardware assumptions, both corrected together (diagnosed via the board
- * schematic, AIDK_AI玩具开发板_原理图.pdf):
- *   1. bk7258_qspi.c was driving QSPI0 (GPIO22-25), but this board's
- *      LCD is wired to QSPI1 (GPIO2-5) -- see that file's header comment
- *      for the full pin-by-pin schematic evidence.
- *   2. GC9D01_RESET_PIN below was GPIO_6 (copied from a different board's
- *      dual-screen reference config in BTdocs/DualScreenAVIPlayer.md);
- *      the schematic shows GPIO_6 floating (unconnected) on this board,
- *      the real LCD_RST net is GPIO45.
- * Neither symptom was diagnosable from register-level behavior alone
- * (cmd_start_done simply never asserts when the controller drives pins
- * the panel isn't wired to); both required cross-checking the schematic
- * against gpio_map.h's pinmux function tables.
+ * display 0 is deliberately the QSPI1 panel: that is the one that was
+ * brought up and verified first, so /dev/fb0 keeps pointing at the same
+ * physical screen it always did.
+ *
+ * A missing second panel is not an error.  The panel has no readable ID
+ * register, so an unpopulated footprint is indistinguishable from a working
+ * one from the software side -- every command still "completes".  Failing
+ * bring-up because display 1 is absent would therefore be wrong, and
+ * bk7258_gc9d01_panel_init() cannot detect it either way.
+ *
+ * ---------------------------------------------------------------------
+ * 2026-08-10: why the panel was dark even though the bus was busy
+ * ---------------------------------------------------------------------
+ * Four independent causes, each on its own sufficient to produce a black
+ * screen:
+ *
+ *  1. Panel power was off.  The LCD connector's VDD and LEDA both come from
+ *     LDO_3V3, whose enable is the LDO33_EN net = GPIO52.  Nothing asserted
+ *     it -- worse, bk7258_pwm.c owned GPIO52 as "BK7258_MOTOR_LDO_GPIO" and
+ *     drove it *low* in its setup path, which runs earlier in
+ *     bk7258_bringup() than the display does.  GPIO52 is now a
+ *     reference-counted shared rail (bk7258_ldo33.c).
+ *
+ *  2. Backlight was off.  LEDK comes from the LCD_BL net, switched by Q3
+ *     (MMBT3904) from LCD_BL_PWM = GPIO25.  A GC9D01 module is a
+ *     transmissive TFT: with the backlight off the GRAM contents are
+ *     invisible no matter how correct they are.
+ *
+ *  3. No D/C line -- the pad was pinmuxed as a controller IO instead.
+ *  4. Wrong wire protocol (QSPI-panel header instead of bare opcodes).
+ *
+ * Items 3 and 4 are documented in bk7258_qspi.c.  Two further gaps fixed
+ * here: the previous table dropped 20 of the 50 entries, and CASET/RASET
+ * was never programmed -- bk_lcd_spi_init() ends by setting the drawing
+ * window to the full panel, and a GC9-series panel's window registers have
+ * no guaranteed reset value.
+ *
+ * Success criterion note: GC9D01 exposes no readable ID register (there is
+ * no RDID opcode anywhere in the vendor's table), so "the sequence was sent
+ * without timing out" has never been evidence that the panel accepted it.
+ * The only proof is pixels on the glass.
  *
  * SPDX-License-Identifier: Apache-2.0
  ****************************************************************************/
@@ -60,39 +74,83 @@
 #include <errno.h>
 
 #include "bk7258_gpio.h"
+#include "bk7258_ldo33.h"
 #include "bk7258_qspi.h"
 #include "bk7258_gc9d01_fb.h"
 
-/* GC9D01 reset pin, corrected against the actual board schematic
- * (AIDK_AI玩具开发板_原理图.pdf) after this driver's original QSPI0/GPIO6
- * assumption (ported from BTdocs/DualScreenAVIPlayer.md's lcd0 config,
- * a *different* board's dual-screen reference layout) caused the very
- * first init command (0xFE) to time out -- the panel was never wired to
- * the pins this driver was toggling.  The schematic (sheet 2/6 main chip
- * pin table) shows GPIO_6 net-labelled nothing at all on this board
- * (floating, no connection); the actual LCD_RST net is wired to chip pin
- * 65 = P45 = GPIO45 (same sheet's pin table row "P45/0CSN/B5/D2/2LRCK"),
- * confirmed again on sheet 5/6's CN5 single-screen connector pin 13
- * (labelled LCD_RST). See bk7258_qspi.c's file header for the QSPI0->
- * QSPI1 correction that was diagnosed alongside this one (both changes
- * were needed to get past the same "cmd 0xFE timed out" symptom). */
-#define GC9D01_RESET_PIN 45u
+/****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
 
-/* Post-Sleep-Out settle delay before Display On, per upstream
- * gc9d01_init_cmds entry {0x00, {0x78}, 0xFF} (0x78 = 120 decimal ms). */
-#define GC9D01_SLEEP_OUT_DELAY_MS 120u
+/* Shared across both panels.
+ *
+ *   P25 -> LCD_BL_PWM -> Q3 base -> LCD_BL -> both panels' LEDK
+ *   P52 -> LDO33_EN   -> LDO_3V3 -> both panels' VDD + LEDA
+ */
+
+#define GC9D01_BACKLIGHT_PIN 25u
+
+/* Time for LDO_3V3 to come up before any panel is touched.  No datasheet
+ * citation; 20ms is generously above any small LDO's soft-start and costs
+ * nothing once per boot.
+ */
+
+#define GC9D01_LDO_SETTLE_MS 20u
+
+/* Delay-marker convention from the vendor table: data_len == 0xFF means
+ * "this is not a command, delay data[0] milliseconds", handled by
+ * bk_lcd_spi_init() rather than by the bus driver.
+ */
+
+#define GC9D01_DELAY_MARKER  0xFFu
 
 struct gc9d01_init_cmd
 {
   uint8_t cmd;
-  uint8_t data[4];
+  uint8_t data[32];
   uint8_t data_len;
 };
 
-/* Entries below are the 30 upstream commands whose data_len <= 4 and that
- * precede the Sleep Out (0x11) command; see file header comment above for
- * the full list of the 20 omitted upstream entries and why. */
-static const struct gc9d01_init_cmd g_gc9d01_init_cmds_pre_sleep_out[] =
+/* Per-panel wiring.  Indexed by display number. */
+
+struct gc9d01_panel_s
+{
+  int bus;                 /* BK7258_LCD_BUS0 / BUS1 */
+  unsigned int dc_pin;
+  unsigned int reset_pin;
+  const char *footprint;   /* schematic designator, for logs */
+};
+
+/****************************************************************************
+ * Private Data
+ ****************************************************************************/
+
+static const struct gc9d01_panel_s g_panels[GC9D01_NDISPLAYS] =
+{
+  {
+    .bus       = BK7258_LCD_BUS1,
+    .dc_pin    = 5u,
+    .reset_pin = 45u,
+    .footprint = "LCD1",
+  },
+  {
+    .bus       = BK7258_LCD_BUS0,
+    .dc_pin    = 7u,
+    .reset_pin = 6u,
+    .footprint = "LCD2",
+  },
+};
+
+static bool g_rail_held;
+
+/* All 50 entries of gc9d01_init_cmds, in order, including the delay marker
+ * and the trailing Display On.  Earlier revisions of this file omitted 20
+ * of them -- 11 because the old bus driver could not carry more than 4
+ * payload bytes, and 9 with no stated reason -- which meant the panel's
+ * gamma, porch and power-control registers were left at reset values.
+ */
+
+static const struct gc9d01_init_cmd g_gc9d01_init_cmds[] =
 {
   { 0xFE, { 0x00 }, 0 },
   { 0xEF, { 0x00 }, 0 },
@@ -114,108 +172,200 @@ static const struct gc9d01_init_cmd g_gc9d01_init_cmds_pre_sleep_out[] =
   { 0x8F, { 0xFF }, 1 },
   { 0x3A, { 0x05 }, 1 },
   { 0xEC, { 0x01 }, 1 },
+  { 0x74, { 0x02, 0x0E, 0x00, 0x00, 0x00, 0x00, 0x00 }, 7 },
+  { 0x98, { 0x3E, 0x99, 0x3E }, 3 },
+  { 0xB5, { 0x0D, 0x0D }, 2 },
+  { 0x60, { 0x38, 0x0F, 0x79, 0x67 }, 4 },
+  { 0x61, { 0x38, 0x11, 0x79, 0x67 }, 4 },
+  { 0x64, { 0x38, 0x17, 0x71, 0x5F, 0x79, 0x67 }, 6 },
+  { 0x65, { 0x38, 0x13, 0x71, 0x5B, 0x79, 0x67 }, 6 },
+  { 0x6A, { 0x00, 0x00 }, 2 },
+  { 0x6C, { 0x22, 0x02, 0x22, 0x02, 0x22, 0x22, 0x50 }, 7 },
+  { 0x6E,
+      { 0x03, 0x03, 0x01, 0x01, 0x00, 0x00, 0x0F, 0x0F,
+        0x0D, 0x0D, 0x0B, 0x0B, 0x09, 0x09, 0x00, 0x00,
+        0x00, 0x00, 0x0A, 0x0A, 0x0C, 0x0C, 0x0E, 0x0E,
+        0x10, 0x10, 0x00, 0x00, 0x02, 0x02, 0x04, 0x04 }, 32 },
   { 0xBF, { 0x01 }, 1 },
   { 0xF9, { 0x40 }, 1 },
   { 0x9B, { 0x3B }, 1 },
+  { 0x93, { 0x33, 0x7F, 0x00 }, 3 },
   { 0x7E, { 0x30 }, 1 },
+  { 0x70, { 0x0D, 0x02, 0x08, 0x0D, 0x02, 0x08 }, 6 },
+  { 0x71, { 0x0D, 0x02, 0x08 }, 3 },
+  { 0x91, { 0x0E, 0x09 }, 2 },
   { 0xC3, { 0x18 }, 1 },
   { 0xC4, { 0x18 }, 1 },
   { 0xC9, { 0x3C }, 1 },
+  { 0xF0, { 0x13, 0x15, 0x04, 0x05, 0x01, 0x38 }, 6 },
+  { 0xF2, { 0x13, 0x15, 0x04, 0x05, 0x01, 0x34 }, 6 },
+  { 0xF1, { 0x4B, 0xB8, 0x7B, 0x34, 0x35, 0xEF }, 6 },
+  { 0xF3, { 0x47, 0xB4, 0x72, 0x34, 0x35, 0xDA }, 6 },
   { 0x36, { 0x00 }, 1 },
-  { 0x11, { 0x00 }, 0 }, /* Sleep Out */
+  { 0x34, { 0x00 }, 0 },                    /* Tearing Effect line off */
+  { 0x11, { 0x00 }, 0 },                    /* Sleep Out */
+  { 0x00, { 0x78 }, GC9D01_DELAY_MARKER },  /* delay 120ms */
+  { 0x29, { 0x00 }, 0 },                    /* Display On */
 };
 
-#define GC9D01_PRE_SLEEP_OUT_CMD_COUNT \
-  (sizeof(g_gc9d01_init_cmds_pre_sleep_out) / \
-   sizeof(g_gc9d01_init_cmds_pre_sleep_out[0]))
-
-/* Display On (0x29), sent GC9D01_SLEEP_OUT_DELAY_MS after Sleep Out. */
-static const struct gc9d01_init_cmd g_gc9d01_display_on = { 0x29, { 0x00 }, 0 };
+#define GC9D01_INIT_CMD_COUNT \
+  (sizeof(g_gc9d01_init_cmds) / sizeof(g_gc9d01_init_cmds[0]))
 
 /****************************************************************************
- * Name: bk7258_gc9d01_hw_reset
+ * Private Functions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: gc9d01_hw_reset
  *
  * Description:
- *   Drive the GC9D01 RESET pin through a high-low-high pulse to force a
- *   hardware reset.  Timing: the 10ms pre/post pulse widths are a
- *   conservative margin (GC9D01 reset pulse width requirements are
- *   typically in the microsecond range; 10ms has no specific datasheet
- *   citation but costs nothing at bring-up time).  The final 120ms
- *   post-reset settle delay before issuing any command matches the
- *   reset-to-ready delay used across every other panel driver in the same
- *   bk_avdk_smp codebase (ap/components/bk_peripheral/src/lcd/rgb and .../mcu
- *   uniformly use rtos_delay_milliseconds(120) after hardware reset, e.g.
- *   lcd_st7701s.c:48, lcd_nt35512.c:859, lcd_st7789v.c:167), i.e. 120ms is
- *   the de-facto standard settle time for this class of display driver IC
- *   and is not GC9D01-specific tuning.
+ *   High-low-high pulse on RESET, mirroring lcd_spi_device_gpio_init():
+ *   high, low for 100ms, high, then 120ms settle before any command.  The
+ *   120ms figure is the de-facto standard across every panel driver in the
+ *   same bk_avdk_smp codebase (lcd_st7701s.c:48, lcd_nt35512.c:859,
+ *   lcd_st7789v.c:167 all use rtos_delay_milliseconds(120) post-reset).
  *
  ****************************************************************************/
 
-static void bk7258_gc9d01_hw_reset(void)
+static void gc9d01_hw_reset(unsigned int reset_pin)
 {
-  bk7258_gpio_output(GC9D01_RESET_PIN, true);
-  up_udelay(10000);
-  bk7258_gpio_write(GC9D01_RESET_PIN, false);
-  up_udelay(10000);
-  bk7258_gpio_write(GC9D01_RESET_PIN, true);
-  up_udelay(120000);
+  bk7258_gpio_output(reset_pin, true);
+  up_mdelay(10);
+  bk7258_gpio_write(reset_pin, false);
+  up_mdelay(100);
+  bk7258_gpio_write(reset_pin, true);
+  up_mdelay(120);
 }
 
 /****************************************************************************
- * Name: bk7258_gc9d01_test
+ * Name: gc9d01_set_window
  *
  * Description:
- *   Bring-up smoke test for the GC9D01 panel: hardware reset, QSPI0 init,
- *   then send the full init command sequence (pre-Sleep-Out commands,
- *   Sleep Out, 120ms settle delay, Display On).  There is no Read ID
- *   command in the upstream init table (verified: the only "0x04" bytes
- *   found in lcd_spi_gc9d01.c are payload data, not an RDID opcode), so
- *   this test cannot verify success by reading back a panel ID.  Success
- *   criterion is therefore "the full init sequence is sent without the
- *   call hanging or crashing", not a register readback match.
+ *   CASET/RASET, 16-bit big-endian start and end.  bk_lcd_spi_init() ends
+ *   with this for the full panel area; nothing in the command table sets
+ *   it, so without this call the drawing window is whatever the panel's
+ *   reset state happens to be.
  *
  ****************************************************************************/
 
-int bk7258_gc9d01_panel_init(void)
+static bool gc9d01_set_window(int bus, uint16_t x0, uint16_t y0,
+                              uint16_t x1, uint16_t y1)
 {
+  uint8_t args[4];
+
+  args[0] = (uint8_t)(x0 >> 8);
+  args[1] = (uint8_t)(x0 & 0xff);
+  args[2] = (uint8_t)(x1 >> 8);
+  args[3] = (uint8_t)(x1 & 0xff);
+
+  if (!bk7258_lcd_spi_write_cmd_data(bus, GC9D01_CMD_CASET, args, 4))
+    {
+      return false;
+    }
+
+  args[0] = (uint8_t)(y0 >> 8);
+  args[1] = (uint8_t)(y0 & 0xff);
+  args[2] = (uint8_t)(y1 >> 8);
+  args[3] = (uint8_t)(y1 & 0xff);
+
+  return bk7258_lcd_spi_write_cmd_data(bus, GC9D01_CMD_RASET, args, 4);
+}
+
+/****************************************************************************
+ * Public Functions
+ ****************************************************************************/
+
+int bk7258_gc9d01_bus(int display)
+{
+  if (display < 0 || display >= GC9D01_NDISPLAYS)
+    {
+      return -EINVAL;
+    }
+
+  return g_panels[display].bus;
+}
+
+bool bk7258_gc9d01_window_full(int display)
+{
+  if (display < 0 || display >= GC9D01_NDISPLAYS)
+    {
+      return false;
+    }
+
+  return gc9d01_set_window(g_panels[display].bus, 0, 0,
+                           GC9D01_XRES - 1, GC9D01_YRES - 1);
+}
+
+void bk7258_gc9d01_backlight(bool on)
+{
+  bk7258_gpio_output(GC9D01_BACKLIGHT_PIN, on);
+}
+
+int bk7258_gc9d01_panel_init(int display)
+{
+  const struct gc9d01_panel_s *panel;
   size_t i;
 
-  printf("gc9d01: hardware reset\n");
-  bk7258_gc9d01_hw_reset();
-
-  printf("gc9d01: qspi0 init\n");
-  bk7258_qspi0_init();
-
-  printf("gc9d01: sending %u init commands (through sleep out)\n",
-         (unsigned int)GC9D01_PRE_SLEEP_OUT_CMD_COUNT);
-  for (i = 0; i < GC9D01_PRE_SLEEP_OUT_CMD_COUNT; i++)
+  if (display < 0 || display >= GC9D01_NDISPLAYS)
     {
-      if (!bk7258_qspi0_send_cmd(g_gc9d01_init_cmds_pre_sleep_out[i].cmd,
-                                 g_gc9d01_init_cmds_pre_sleep_out[i].data,
-                                 g_gc9d01_init_cmds_pre_sleep_out[i].data_len))
+      return -EINVAL;
+    }
+
+  panel = &g_panels[display];
+
+  /* Power first, and only once: the rail is shared, so take a reference on
+   * behalf of the display subsystem as a whole rather than per panel.
+   */
+
+  if (!g_rail_held)
+    {
+      printf("gc9d01: LDO33 rail on (refs=%u)\n", bk7258_ldo33_request());
+      g_rail_held = true;
+      up_mdelay(GC9D01_LDO_SETTLE_MS);
+    }
+
+  printf("gc9d01[%d/%s]: hardware reset (RST=GPIO%u)\n", display,
+         panel->footprint, (unsigned int)panel->reset_pin);
+  gc9d01_hw_reset(panel->reset_pin);
+
+  bk7258_lcd_spi_init(panel->bus, panel->dc_pin);
+
+  printf("gc9d01[%d/%s]: sending %u init entries\n", display,
+         panel->footprint, (unsigned int)GC9D01_INIT_CMD_COUNT);
+
+  for (i = 0; i < GC9D01_INIT_CMD_COUNT; i++)
+    {
+      const struct gc9d01_init_cmd *entry = &g_gc9d01_init_cmds[i];
+
+      if (entry->data_len == GC9D01_DELAY_MARKER)
         {
-          printf("gc9d01: qspi0 timed out waiting for cmd 0x%02x "
-                 "(index %u) to complete, aborting init sequence\n",
-                 g_gc9d01_init_cmds_pre_sleep_out[i].cmd, (unsigned int)i);
-          return -1;
+          up_mdelay(entry->data[0]);
+          continue;
+        }
+
+      if (!bk7258_lcd_spi_write_cmd_data(panel->bus, entry->cmd,
+                                         entry->data, entry->data_len))
+        {
+          printf("gc9d01[%d]: cmd 0x%02x (entry %u) timed out, aborting\n",
+                 display, entry->cmd, (unsigned int)i);
+          return -EIO;
         }
     }
 
-  printf("gc9d01: sleep-out settle delay (%u ms)\n",
-         GC9D01_SLEEP_OUT_DELAY_MS);
-  up_udelay(GC9D01_SLEEP_OUT_DELAY_MS * 1000u);
-
-  printf("gc9d01: display on\n");
-  if (!bk7258_qspi0_send_cmd(g_gc9d01_display_on.cmd,
-                              g_gc9d01_display_on.data,
-                              g_gc9d01_display_on.data_len))
+  if (!bk7258_gc9d01_window_full(display))
     {
-      printf("gc9d01: qspi timed out waiting for display-on cmd to "
-             "complete\n");
+      printf("gc9d01[%d]: CASET/RASET failed\n", display);
       return -EIO;
     }
 
-  printf("gc9d01: init sequence sent\n");
+  /* Backlight is shared, so switching it on for one panel switches it on
+   * for both.  Harmless to repeat.
+   */
+
+  bk7258_gc9d01_backlight(true);
+
+  printf("gc9d01[%d/%s]: init sequence sent, backlight on\n", display,
+         panel->footprint);
   return OK;
 }
 
@@ -223,12 +373,11 @@ int bk7258_gc9d01_panel_init(void)
  * Name: bk7258_gc9d01_test
  *
  * Description:
- *   Legacy standalone entry point, kept as a thin wrapper so the panel can
- *   be brought up without the framebuffer layer.  Note the caveat that has
- *   always applied to it: "the sequence was sent without hanging" is not
- *   evidence that the panel accepted it.  The panel has no readable ID
- *   register, so the only real proof is pixels on the glass -- use
- *   bk7258_gc9d01_fb_test_pattern() for that.
+ *   Legacy standalone entry point, kept as a thin wrapper so panel 0 can be
+ *   brought up without the framebuffer layer.  The caveat that has always
+ *   applied to it still applies: "the sequence was sent without hanging" is
+ *   not evidence that the panel accepted it.  Use
+ *   bk7258_gc9d01_fb_test_pattern() for the only real check.
  *
  ****************************************************************************/
 
@@ -237,5 +386,5 @@ int bk7258_gc9d01_test(int argc, char **argv)
   UNUSED(argc);
   UNUSED(argv);
 
-  return bk7258_gc9d01_panel_init();
+  return bk7258_gc9d01_panel_init(0);
 }

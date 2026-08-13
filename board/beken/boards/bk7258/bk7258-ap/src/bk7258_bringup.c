@@ -148,28 +148,43 @@ void board_late_initialize(void)
    * docs/superpowers/plans/2026-07-29-gc9d01-lcd-bringup.md Task 3 Step 3.
    */
 #ifdef CONFIG_BK7258_GC9D01_FB
-  /* GC9D01 framebuffer: fb_register() calls up_fbinitialize(), which does
-   * the panel reset / QSPI bring-up / init sequence and allocates the
-   * 51200-byte RGB565 framebuffer, then publishes /dev/fb0.
+  /* GC9D01 framebuffers, one per populated panel: fb_register() calls
+   * up_fbinitialize(), which does the rail/reset/bus bring-up and the init
+   * sequence and allocates a 51200-byte RGB565 framebuffer, then publishes
+   * /dev/fb<display>.
+   *
+   * Both panels are registered unconditionally.  GC9D01 has no readable ID
+   * register, so an unpopulated footprint cannot be distinguished from a
+   * working panel -- every command still "completes".  Registering /dev/fb1
+   * on a single-panel board therefore costs one unused 51200-byte buffer
+   * and nothing else; refusing to register it would need board-variant
+   * configuration that this board provides no way to detect.
    */
 
-  ret = fb_register(0, 0);
-  if (ret < 0)
-    {
-      printf("fb_register() failed: %d\n", ret);
-    }
-  else
-    {
-      /* The panel has no readable ID register, so "the init sequence was
-       * sent" has never been evidence that it worked.  Draw a pattern once
-       * at boot: four quadrants with a black border makes both a byte-order
-       * mistake (wrong colours) and a stride mistake (sheared boundaries)
-       * visible at a glance.
-       */
+  {
+    int display;
 
-      (void)bk7258_gc9d01_fb_test_pattern();
-      printf("fb: /dev/fb0 registered, boot test pattern pushed\n");
-    }
+    for (display = 0; display < GC9D01_NDISPLAYS; display++)
+      {
+        ret = fb_register(display, 0);
+        if (ret < 0)
+          {
+            printf("fb_register(%d) failed: %d\n", display, ret);
+            continue;
+          }
+
+        /* The panel has no readable ID register, so "the init sequence was
+         * sent" has never been evidence that it worked.  Draw a pattern
+         * once at boot: four quadrants with a black border makes both a
+         * byte-order mistake (wrong colours) and a stride mistake (sheared
+         * boundaries) visible at a glance.
+         */
+
+        (void)bk7258_gc9d01_fb_hello(display);
+        printf("fb: /dev/fb%d registered, boot greeting pushed\n",
+               display);
+      }
+  }
 #endif
 
   /* GC2145 camera: registered as a standard V4L2 /dev/video0 node here

@@ -6,6 +6,7 @@ set(SRCS
     bk7258_irq.c
     bk7258_timerisr.c
     bk7258_gpio.c
+    bk7258_ldo33.c
     bk7258_pwm.c
     bk7258_lowputc.c
     bk7258_syslog.c
@@ -23,6 +24,7 @@ set(SRCS
     bk7258_i2c_sim.c
     bk7258_gc2145_i2c_bitbang.c
     bk7258_yuv_buf.c
+    bk7258_jpeg_enc.c
     bk7258_camera_imgdata.c
     bk7258_aud.c
     bk7258_cpuindex.c

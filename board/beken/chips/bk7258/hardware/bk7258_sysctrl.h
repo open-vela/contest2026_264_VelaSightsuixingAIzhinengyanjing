@@ -67,4 +67,45 @@
 #define BK7258_QSPI0_MODULE_CLK_EN (1u << 20)
 #define BK7258_QSPI1_MODULE_CLK_EN (1u << 21)
 
+/* QSPI1 source-clock select and divider.
+ *
+ * The QSPI block's own config.clk_rate field is NOT where the vendor
+ * driver sets the panel clock: bk_qspi_init()
+ * (bk_avdk_smp release/v3.1.1 ap/middleware/driver/qspi/qspi_driver.c)
+ * programs the source mux and pre-divider through sysctrl via
+ * sys_drv_qspi_clk_sel() / sys_drv_qspi_set_src_clk_div(), and only then
+ * calls qspi_hal_set_clk_div(hal, config->clk_div) -- with clk_div == 0
+ * for every LCD path, i.e. config.clk_rate stays 0.
+ *
+ * Register/field citation: ap/middleware/soc/bk7258_ap/soc/sys_reg.h
+ *   SYS_CPU_26M_WDT_CLK_DIV_ADDR      = SOC_SYS_REG_BASE + (0xa << 2)
+ *   SYS_CPU_26M_WDT_CLK_DIV_CKDIV_QSPI1_POS  = 6,  MASK = 0xf
+ *   SYS_CPU_26M_WDT_CLK_DIV_CKSEL_QSPI1_POS  = 10, MASK = 0x1
+ * and hal/sys_types.h's { QSPI_CLK_320M = 0, QSPI_CLK_480M = 1 }.
+ *
+ * SCK = src / (1 + ckdiv) / (clk_rate == 0 ? 1 : 2 * clk_rate)
+ * (qspi_clk_div_factor() in qspi_driver.c), so the GC9D01 reference
+ * config's LCD_QSPI_60M -- src_clk = QSPI_SCLK_480M, src_clk_div = 7,
+ * clk_div = 0 (lcd_spi_driver_init_with_qspi()) -- is 480 / 8 = 60MHz.
+ */
+
+#define BK7258_SYS_CPU26M_WDT_CLKDIV (BK7258_SYSCTRL_BASE + 0x28u)
+
+#define BK7258_QSPI1_CKDIV_SHIFT   6
+#define BK7258_QSPI1_CKDIV_MASK    (0xfu << BK7258_QSPI1_CKDIV_SHIFT)
+#define BK7258_QSPI1_CKSEL_480M    (1u << 10)
+
+/* QSPI0's equivalent fields live in a different sysctrl register:
+ *   SYS_CPU_CLK_DIV_MODE2_ADDR             = SOC_SYS_REG_BASE + (0x9 << 2)
+ *   SYS_CPU_CLK_DIV_MODE2_CKDIV_QSPI0_POS  = 6,  MASK = 0xf
+ *   SYS_CPU_CLK_DIV_MODE2_CKSEL_QSPI0_POS  = 10, MASK = 0x1
+ * (same bit positions as QSPI1, different register -- easy to conflate).
+ */
+
+#define BK7258_SYS_CPU_CLKDIV_MODE2  (BK7258_SYSCTRL_BASE + 0x24u)
+
+#define BK7258_QSPI0_CKDIV_SHIFT   6
+#define BK7258_QSPI0_CKDIV_MASK    (0xfu << BK7258_QSPI0_CKDIV_SHIFT)
+#define BK7258_QSPI0_CKSEL_480M    (1u << 10)
+
 #endif

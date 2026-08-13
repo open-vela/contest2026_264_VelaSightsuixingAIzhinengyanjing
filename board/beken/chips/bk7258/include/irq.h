@@ -37,6 +37,14 @@
  */
 
 #define BK7258_EXTIRQ_AUDIO       23
+
+/* Hardware JPEG encoder interrupt.  bk_avdk_smp release/v3.1.1
+ * ap/middleware/soc/bk7258_ap/soc/icu_map.h:55 maps INT_SRC_JPEG_ENC to
+ * external interrupt line 25 in GROUP0 (line 26 is INT_SRC_JPEG_DEC --
+ * the decoder, a different module).
+ */
+
+#define BK7258_EXTIRQ_JPEG_ENC    25
 #define BK7258_EXTIRQ_YUVB        58
 #define BK7258_EXTIRQ_MAILBOX     63
 #define BK7258_EXTIRQ_COUNT       64
@@ -49,6 +57,8 @@
 #define BK7258_IRQ_UART1           (BK7258_IRQ_FIRST + BK7258_EXTIRQ_UART1)
 #define BK7258_IRQ_UART2           (BK7258_IRQ_FIRST + BK7258_EXTIRQ_UART2)
 #define BK7258_IRQ_AUDIO           (BK7258_IRQ_FIRST + BK7258_EXTIRQ_AUDIO)
+#define BK7258_IRQ_JPEG_ENC        (BK7258_IRQ_FIRST + \
+                                    BK7258_EXTIRQ_JPEG_ENC)
 #define BK7258_IRQ_YUVB            (BK7258_IRQ_FIRST + BK7258_EXTIRQ_YUVB)
 #define BK7258_IRQ_MAILBOX         (BK7258_IRQ_FIRST + BK7258_EXTIRQ_MAILBOX)
 

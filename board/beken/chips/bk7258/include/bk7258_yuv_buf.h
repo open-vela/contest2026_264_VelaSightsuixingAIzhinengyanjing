@@ -100,6 +100,29 @@ void bk7258_yuv_buf_set_frame_callback(bk7258_yuv_buf_frame_cb_t cb,
 
 void bk7258_yuv_buf_start(void);
 
+/* Same as bk7258_yuv_buf_start() except that the module's own frame writer
+ * stays off, because the JPEG encoder is consuming the pixel stream instead.
+ * Encoded-frame completion arrives on the JPEG block's EOF interrupt; the
+ * VSYNC interrupt is still enabled here because the capture watchdog uses it
+ * as the "sensor is alive" marker.
+ */
+
+void bk7258_yuv_buf_start_jpeg(void);
+
+/* Called on every VSYNC negedge, i.e. at each frame boundary.  Runs in
+ * interrupt context.  The JPEG path uses it for error recovery, since in
+ * JPEG mode the frame-done callback never fires.
+ */
+
+void bk7258_yuv_buf_set_vsync_callback(bk7258_yuv_buf_frame_cb_t cb,
+                                      FAR void *arg);
+
+/* Pulses the module's global soft reset (0 = held, 1 = released), leaving
+ * the clock gate bypassed.  Print-free; callable from interrupt context.
+ */
+
+void bk7258_yuv_buf_soft_reset(void);
+
 /* Disables YUV direct-capture mode and silences the interrupts again.
  * Interrupt-safe: the V4L2 framework calls IMGDATA_STOP_CAPTURE from
  * complete_capture() (interrupt context) when it runs out of vacant

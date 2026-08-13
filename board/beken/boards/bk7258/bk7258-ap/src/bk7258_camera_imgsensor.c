@@ -80,8 +80,13 @@
 #define GC2145_MCLK_CKSEL               3u
 #define GC2145_MCLK_CKDIV               19u
 
-#define GC2145_CAPTURE_WIDTH   640u
-#define GC2145_CAPTURE_HEIGHT  480u
+/* Index into g_gc2145_modes of the mode programmed at init: 640x480, the
+ * geometry the whole capture path was brought up and measured on.  Kept as
+ * an index rather than a width/height pair so there is exactly one place
+ * that decides it.
+ */
+
+#define GC2145_DEFAULT_MODE    1u
 
 /* GC2145 identity registers, per dvp_gc2145.c's CHIP_ID_ADDR_HB/LB and
  * CHIP_ID_VAL_HB/LB.  Readable only after power-on + MCLK, which is why
@@ -117,7 +122,8 @@ struct bk7258_gc2145_dev_s
 {
   struct imgsensor_s sensor;    /* Must be first: base-pointer cast. */
   bool initialized;
-  uint32_t current_fps;         /* Frame rate actually programmed. */
+  uint32_t current_fps;         /* Rate programmed, 0 = fixed by the mode. */
+  FAR const struct gc2145_mode *mode;   /* Resolution programmed. */
 };
 
 /****************************************************************************
@@ -743,7 +749,77 @@ static const struct gc2145_reg g_gc2145_init_regs[] =
 #define GC2145_INIT_REG_COUNT \
   (sizeof(g_gc2145_init_regs) / sizeof(g_gc2145_init_regs[0]))
 
-/* 640x480 resolution/window register table (40 entries). */
+/* Sensor modes.
+ *
+ * Every table below is the reference driver's own (dvp_gc2145.c): these are
+ * the sensor vendor's numbers for window, sub-sampling and crop, and there
+ * is no independent source for them.  They were extracted mechanically
+ * rather than retyped -- the extractor was checked by having it reproduce
+ * the 640x480 table this driver already carried, byte for byte.
+ *
+ * Which resolutions appear here is decided by what can be described
+ * honestly.  The reference programs a frame rate by dispatching on the
+ * output width it reads back from registers 0x97/0x98, and it only handles
+ * widths 1600, 1280, 864 and 640.  For 480 and 800 wide it programs no rate
+ * at all: those modes run at whatever their own window table fixes.  So
+ * 480x320 and 800x480 are left out entirely (nothing true could be reported
+ * for VIDIOC_ENUM_FRAMEINTERVALS), while 480x480 is kept -- it is the one
+ * mode that maps 1:1 onto the round 160x160 panels with no cropping -- and
+ * is marked as having no programmable rate.
+ */
+
+/* 480x480 window/subsample table (41 entries), transcribed from the
+ * reference's sensor_gc2145_480_480_table.
+ */
+
+static const struct gc2145_reg g_gc2145_480_480_regs[] =
+{
+  { 0xFE, 0x00 },
+  { 0xFE, 0x00 },
+  { 0xF8, 0x85 },
+  { 0xFA, 0x11 },
+  { 0xFE, 0x00 },
+  { 0x09, 0x00 },
+  { 0x0A, 0x78 },
+  { 0x0B, 0x01 },
+  { 0x0C, 0x40 },
+  { 0x0D, 0x03 },
+  { 0x0E, 0xD0 },
+  { 0x0F, 0x03 },
+  { 0x10, 0xD0 },
+  { 0xFD, 0x00 },
+  { 0x90, 0x01 },
+  { 0x91, 0x00 },
+  { 0x92, 0x00 },
+  { 0x93, 0x00 },
+  { 0x94, 0x00 },
+  { 0x95, 0x01 },
+  { 0x96, 0xE0 },
+  { 0x97, 0x01 },
+  { 0x98, 0xE0 },
+  { 0x99, 0x22 },
+  { 0xFE, 0x00 },
+  { 0x05, 0x01 },
+  { 0x06, 0x56 },
+  { 0x07, 0x00 },
+  { 0x08, 0xA0 },
+  { 0xFE, 0x01 },
+  { 0x25, 0x01 },
+  { 0x26, 0x63 },
+  { 0x27, 0x04 },
+  { 0x28, 0x29 },
+  { 0x29, 0x04 },
+  { 0x2A, 0x29 },
+  { 0x2B, 0x04 },
+  { 0x2C, 0x29 },
+  { 0x2D, 0x04 },
+  { 0x2E, 0x29 },
+  { 0xFE, 0x00 },
+};
+
+/* 640x480 window/subsample table (40 entries), transcribed from the
+ * reference's sensor_gc2145_640_480_table.
+ */
 
 static const struct gc2145_reg g_gc2145_640_480_regs[] =
 {
@@ -789,8 +865,330 @@ static const struct gc2145_reg g_gc2145_640_480_regs[] =
   { 0x98, 0x80 },
 };
 
-#define GC2145_640_480_REG_COUNT \
-  (sizeof(g_gc2145_640_480_regs) / sizeof(g_gc2145_640_480_regs[0]))
+/* 864x480 window/subsample table (45 entries), transcribed from the
+ * reference's sensor_gc2145_864_480_table.
+ */
+
+static const struct gc2145_reg g_gc2145_864_480_regs[] =
+{
+  { 0xFE, 0x00 },
+  { 0xFD, 0x00 },
+  { 0xFA, 0x11 },
+  { 0xFE, 0x00 },
+  { 0x09, 0x01 },
+  { 0x0A, 0x70 },
+  { 0x0B, 0x01 },
+  { 0x0C, 0x68 },
+  { 0x0D, 0x02 },
+  { 0x0E, 0x40 },
+  { 0x0F, 0x03 },
+  { 0x10, 0xE0 },
+  { 0x90, 0x01 },
+  { 0x91, 0x00 },
+  { 0x92, 0x00 },
+  { 0x93, 0x00 },
+  { 0x94, 0x00 },
+  { 0x95, 0x01 },
+  { 0x96, 0xE0 },
+  { 0x97, 0x03 },
+  { 0x98, 0x60 },
+  { 0x99, 0x11 },
+  { 0x9A, 0x06 },
+  { 0xFE, 0x00 },
+  { 0xEC, 0x06 },
+  { 0xED, 0x04 },
+  { 0xEE, 0x60 },
+  { 0xEF, 0x90 },
+  { 0xFE, 0x01 },
+  { 0x74, 0x01 },
+  { 0xFE, 0x01 },
+  { 0x01, 0x04 },
+  { 0x02, 0xC0 },
+  { 0x03, 0x04 },
+  { 0x04, 0x90 },
+  { 0x05, 0x30 },
+  { 0x06, 0x90 },
+  { 0x07, 0x30 },
+  { 0x08, 0x80 },
+  { 0x0A, 0x82 },
+  { 0xFE, 0x01 },
+  { 0x21, 0x15 },
+  { 0xFE, 0x00 },
+  { 0x20, 0x15 },
+  { 0xFE, 0x00 },
+};
+
+/* 640x480 at 30 fps (17 entries): frame length (page 0 0x07/0x08) and the
+ * AEC step table (page 1 0x25..0x2E) that belongs with it.  Writing only the
+ * frame length, as an earlier revision did, leaves the exposure ladder set
+ * for a different rate.
+ */
+
+static const struct gc2145_reg g_gc2145_640_480_30fps_regs[] =
+{
+  { 0xFE, 0x00 },
+  { 0x05, 0x01 },
+  { 0x06, 0x56 },
+  { 0x07, 0x00 },
+  { 0x08, 0xA0 },
+  { 0xFE, 0x01 },
+  { 0x25, 0x01 },
+  { 0x26, 0x63 },
+  { 0x27, 0x04 },
+  { 0x28, 0x29 },
+  { 0x29, 0x04 },
+  { 0x2A, 0x29 },
+  { 0x2B, 0x04 },
+  { 0x2C, 0x29 },
+  { 0x2D, 0x04 },
+  { 0x2E, 0x29 },
+  { 0xFE, 0x00 },
+};
+
+/* 640x480 at 25 fps (17 entries): frame length (page 0 0x07/0x08) and the
+ * AEC step table (page 1 0x25..0x2E) that belongs with it.  Writing only the
+ * frame length, as an earlier revision did, leaves the exposure ladder set
+ * for a different rate.
+ */
+
+static const struct gc2145_reg g_gc2145_640_480_25fps_regs[] =
+{
+  { 0xFE, 0x00 },
+  { 0x05, 0x01 },
+  { 0x06, 0x56 },
+  { 0x07, 0x01 },
+  { 0x08, 0x7A },
+  { 0xFE, 0x01 },
+  { 0x25, 0x01 },
+  { 0x26, 0x63 },
+  { 0x27, 0x04 },
+  { 0x28, 0x29 },
+  { 0x29, 0x04 },
+  { 0x2A, 0x29 },
+  { 0x2B, 0x04 },
+  { 0x2C, 0x29 },
+  { 0x2D, 0x04 },
+  { 0x2E, 0x29 },
+  { 0xFE, 0x00 },
+};
+
+/* 640x480 at 20 fps (17 entries): frame length (page 0 0x07/0x08) and the
+ * AEC step table (page 1 0x25..0x2E) that belongs with it.  Writing only the
+ * frame length, as an earlier revision did, leaves the exposure ladder set
+ * for a different rate.
+ */
+
+static const struct gc2145_reg g_gc2145_640_480_20fps_regs[] =
+{
+  { 0xFE, 0x00 },
+  { 0x05, 0x01 },
+  { 0x06, 0x56 },
+  { 0x07, 0x03 },
+  { 0x08, 0x02 },
+  { 0xFE, 0x01 },
+  { 0x25, 0x01 },
+  { 0x26, 0x63 },
+  { 0x27, 0x04 },
+  { 0x28, 0x29 },
+  { 0x29, 0x04 },
+  { 0x2A, 0x29 },
+  { 0x2B, 0x04 },
+  { 0x2C, 0x29 },
+  { 0x2D, 0x04 },
+  { 0x2E, 0x29 },
+  { 0xFE, 0x00 },
+};
+
+/* 640x480 at 15 fps (17 entries): frame length (page 0 0x07/0x08) and the
+ * AEC step table (page 1 0x25..0x2E) that belongs with it.  Writing only the
+ * frame length, as an earlier revision did, leaves the exposure ladder set
+ * for a different rate.
+ */
+
+static const struct gc2145_reg g_gc2145_640_480_15fps_regs[] =
+{
+  { 0xFE, 0x00 },
+  { 0x05, 0x01 },
+  { 0x06, 0x56 },
+  { 0x07, 0x05 },
+  { 0x08, 0x50 },
+  { 0xFE, 0x01 },
+  { 0x25, 0x01 },
+  { 0x26, 0x63 },
+  { 0x27, 0x04 },
+  { 0x28, 0x29 },
+  { 0x29, 0x04 },
+  { 0x2A, 0x29 },
+  { 0x2B, 0x04 },
+  { 0x2C, 0x29 },
+  { 0x2D, 0x04 },
+  { 0x2E, 0x29 },
+  { 0xFE, 0x00 },
+};
+
+/* 864x480 at 25 fps (16 entries): frame length (page 0 0x07/0x08) and the
+ * AEC step table (page 1 0x25..0x2E) that belongs with it.  Writing only the
+ * frame length, as an earlier revision did, leaves the exposure ladder set
+ * for a different rate.
+ */
+
+static const struct gc2145_reg g_gc2145_864_480_25fps_regs[] =
+{
+  { 0xFE, 0x00 },
+  { 0x05, 0x01 },
+  { 0x06, 0x56 },
+  { 0x07, 0x00 },
+  { 0x08, 0x50 },
+  { 0xFE, 0x01 },
+  { 0x25, 0x00 },
+  { 0x26, 0xFA },
+  { 0x27, 0x04 },
+  { 0x28, 0xE2 },
+  { 0x29, 0x04 },
+  { 0x2A, 0xE2 },
+  { 0x2B, 0x04 },
+  { 0x2C, 0xE2 },
+  { 0x2D, 0x04 },
+  { 0x2E, 0xE2 },
+};
+
+/* 864x480 at 20 fps (16 entries): frame length (page 0 0x07/0x08) and the
+ * AEC step table (page 1 0x25..0x2E) that belongs with it.  Writing only the
+ * frame length, as an earlier revision did, leaves the exposure ladder set
+ * for a different rate.
+ */
+
+static const struct gc2145_reg g_gc2145_864_480_20fps_regs[] =
+{
+  { 0xFE, 0x00 },
+  { 0x05, 0x01 },
+  { 0x06, 0x56 },
+  { 0x07, 0x01 },
+  { 0x08, 0x00 },
+  { 0xFE, 0x01 },
+  { 0x25, 0x00 },
+  { 0x26, 0xFA },
+  { 0x27, 0x04 },
+  { 0x28, 0xE2 },
+  { 0x29, 0x04 },
+  { 0x2A, 0xE2 },
+  { 0x2B, 0x04 },
+  { 0x2C, 0xE2 },
+  { 0x2D, 0x04 },
+  { 0x2E, 0xE2 },
+};
+
+/* 864x480 at 15 fps (16 entries): frame length (page 0 0x07/0x08) and the
+ * AEC step table (page 1 0x25..0x2E) that belongs with it.  Writing only the
+ * frame length, as an earlier revision did, leaves the exposure ladder set
+ * for a different rate.
+ */
+
+static const struct gc2145_reg g_gc2145_864_480_15fps_regs[] =
+{
+  { 0xFE, 0x00 },
+  { 0x05, 0x01 },
+  { 0x06, 0x56 },
+  { 0x07, 0x02 },
+  { 0x08, 0x08 },
+  { 0xFE, 0x01 },
+  { 0x25, 0x00 },
+  { 0x26, 0xFA },
+  { 0x27, 0x04 },
+  { 0x28, 0xE2 },
+  { 0x29, 0x04 },
+  { 0x2A, 0xE2 },
+  { 0x2B, 0x04 },
+  { 0x2C, 0xE2 },
+  { 0x2D, 0x04 },
+  { 0x2E, 0xE2 },
+};
+
+/* One selectable frame rate: the register writes that produce it. */
+
+struct gc2145_fps_mode
+{
+  uint32_t fps;
+  FAR const struct gc2145_reg *regs;
+  size_t nregs;
+};
+
+/* One selectable resolution, with the rates programmable at it.
+ *
+ * nfps == 0 means the rate is whatever the window table fixes; the driver
+ * then programs no rate and reports no interval, rather than claiming one it
+ * cannot deliver.
+ */
+
+struct gc2145_mode
+{
+  uint16_t width;
+  uint16_t height;
+  FAR const struct gc2145_reg *regs;
+  size_t nregs;
+  FAR const struct gc2145_fps_mode *fps;
+  size_t nfps;
+};
+
+#define GC2145_REGS(t)  (t), (sizeof(t) / sizeof((t)[0]))
+
+static const struct gc2145_fps_mode g_gc2145_640_480_fps[] =
+{
+  { 30, GC2145_REGS(g_gc2145_640_480_30fps_regs) },
+  { 25, GC2145_REGS(g_gc2145_640_480_25fps_regs) },
+  { 20, GC2145_REGS(g_gc2145_640_480_20fps_regs) },
+  { 15, GC2145_REGS(g_gc2145_640_480_15fps_regs) },
+};
+
+static const struct gc2145_fps_mode g_gc2145_864_480_fps[] =
+{
+  { 25, GC2145_REGS(g_gc2145_864_480_25fps_regs) },
+  { 20, GC2145_REGS(g_gc2145_864_480_20fps_regs) },
+  { 15, GC2145_REGS(g_gc2145_864_480_15fps_regs) },
+};
+
+/* Ordered smallest first so index 0 of VIDIOC_ENUM_FRAMESIZES is the
+ * cheapest mode.  640x480 stays the driver's default because it is the mode
+ * the whole capture path was brought up and measured on.
+ *
+ * 1280x720 and 1600x1200 are deliberately absent even though their register
+ * tables are above.  1280x720 was tried on hardware and wedges the board:
+ * capture starts, then the AP stops responding and the CP's IPC watchdog
+ * fires ("AP link down" followed by "IPC[1]heartbeat timeout" and an assert
+ * in mb_ipc_task), taking the whole system down.  It is not an allocation
+ * failure -- three 1280x720 buffers are 5,529,600 bytes against a 5,701,632
+ * byte display pool, and a pool that cannot serve a request returns NULL,
+ * which REQBUFS reports cleanly as -ENOMEM.
+ *
+ * The suspect is sustained PSRAM write bandwidth: 640x480 works out at about
+ * 37MB/s (614400 bytes x the ~60 frames/s the hardware actually delivers),
+ * and 1280x720 at the same frame rate would be ~105MB/s, with the CP sharing
+ * that bus.  Which points at the other open question -- the frame rate the
+ * sensor delivers is about twice what these tables program (30fps programmed,
+ * 59.8 frames/s counted, and the frame callback fires once per frame on
+ * YUV_ARV only).  Until that is understood, a mode that can hang the board
+ * has no business being advertised as a capability.
+ */
+
+static const struct gc2145_mode g_gc2145_modes[] =
+{
+  {
+    480, 480, GC2145_REGS(g_gc2145_480_480_regs), NULL, 0
+  },
+  {
+    640, 480, GC2145_REGS(g_gc2145_640_480_regs),
+    g_gc2145_640_480_fps,
+    sizeof(g_gc2145_640_480_fps) / sizeof(g_gc2145_640_480_fps[0])
+  },
+  {
+    864, 480, GC2145_REGS(g_gc2145_864_480_regs),
+    g_gc2145_864_480_fps,
+    sizeof(g_gc2145_864_480_fps) / sizeof(g_gc2145_864_480_fps[0])
+  },
+};
+
+#define GC2145_MODE_COUNT \
+  (sizeof(g_gc2145_modes) / sizeof(g_gc2145_modes[0]))
 
 static const struct imgsensor_ops_s g_bk7258_gc2145_ops =
 {
@@ -886,6 +1284,13 @@ static const struct v4l2_fmtdesc g_bk7258_gc2145_fmtdescs[] =
     .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
     .pixelformat = V4L2_PIX_FMT_UYVY,
   },
+  {
+    .index = 1,
+    .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+    .pixelformat = V4L2_PIX_FMT_JPEG,
+    .description = "JPEG",
+    .flags = V4L2_FMT_FLAG_COMPRESSED,
+  },
 };
 
 static const struct v4l2_frmsizeenum g_bk7258_gc2145_frmsizes[] =
@@ -896,15 +1301,68 @@ static const struct v4l2_frmsizeenum g_bk7258_gc2145_frmsizes[] =
     .type = V4L2_FRMSIZE_TYPE_DISCRETE,
     .discrete =
       {
-        .width = GC2145_CAPTURE_WIDTH,
-        .height = GC2145_CAPTURE_HEIGHT,
+        .width = 480,
+        .height = 480,
+      },
+  },
+  {
+    .index = 1,
+    .pixel_format = V4L2_PIX_FMT_UYVY,
+    .type = V4L2_FRMSIZE_TYPE_DISCRETE,
+    .discrete =
+      {
+        .width = 640,
+        .height = 480,
+      },
+  },
+  {
+    .index = 2,
+    .pixel_format = V4L2_PIX_FMT_UYVY,
+    .type = V4L2_FRMSIZE_TYPE_DISCRETE,
+    .discrete =
+      {
+        .width = 864,
+        .height = 480,
+      },
+  },
+  {
+    .index = 3,
+    .pixel_format = V4L2_PIX_FMT_JPEG,
+    .type = V4L2_FRMSIZE_TYPE_DISCRETE,
+    .discrete =
+      {
+        .width = 480,
+        .height = 480,
+      },
+  },
+  {
+    .index = 4,
+    .pixel_format = V4L2_PIX_FMT_JPEG,
+    .type = V4L2_FRMSIZE_TYPE_DISCRETE,
+    .discrete =
+      {
+        .width = 640,
+        .height = 480,
+      },
+  },
+  {
+    .index = 5,
+    .pixel_format = V4L2_PIX_FMT_JPEG,
+    .type = V4L2_FRMSIZE_TYPE_DISCRETE,
+    .discrete =
+      {
+        .width = 864,
+        .height = 480,
       },
   },
 };
 
-/* Frame intervals actually programmable at 640x480 (see
- * g_gc2145_fps_regs).  Reported through VIDIOC_ENUM_FRAMEINTERVALS so
- * applications can discover them instead of guessing.
+/* Frame intervals this driver can actually program, per resolution.
+ *
+ * 480x480 contributes nothing on purpose: the reference programs no rate at
+ * that width (see the comment above the mode tables), so the rate is
+ * whatever its window table fixes and there is no honest value to report
+ * here.  An empty enumeration says "unknown" -- a made-up number would not.
  */
 
 static const struct v4l2_frmivalenum g_bk7258_gc2145_frmintervals[] =
@@ -912,90 +1370,72 @@ static const struct v4l2_frmivalenum g_bk7258_gc2145_frmintervals[] =
   {
     .index = 0, .buf_type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
     .pixel_format = V4L2_PIX_FMT_UYVY,
-    .width = GC2145_CAPTURE_WIDTH, .height = GC2145_CAPTURE_HEIGHT,
+    .width = 640, .height = 480,
     .type = V4L2_FRMIVAL_TYPE_DISCRETE,
     .discrete = { .numerator = 1, .denominator = 30 },
   },
   {
     .index = 1, .buf_type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
     .pixel_format = V4L2_PIX_FMT_UYVY,
-    .width = GC2145_CAPTURE_WIDTH, .height = GC2145_CAPTURE_HEIGHT,
+    .width = 640, .height = 480,
     .type = V4L2_FRMIVAL_TYPE_DISCRETE,
     .discrete = { .numerator = 1, .denominator = 25 },
   },
   {
     .index = 2, .buf_type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
     .pixel_format = V4L2_PIX_FMT_UYVY,
-    .width = GC2145_CAPTURE_WIDTH, .height = GC2145_CAPTURE_HEIGHT,
+    .width = 640, .height = 480,
     .type = V4L2_FRMIVAL_TYPE_DISCRETE,
     .discrete = { .numerator = 1, .denominator = 20 },
   },
   {
     .index = 3, .buf_type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
     .pixel_format = V4L2_PIX_FMT_UYVY,
-    .width = GC2145_CAPTURE_WIDTH, .height = GC2145_CAPTURE_HEIGHT,
+    .width = 640, .height = 480,
+    .type = V4L2_FRMIVAL_TYPE_DISCRETE,
+    .discrete = { .numerator = 1, .denominator = 15 },
+  },
+  {
+    .index = 4, .buf_type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+    .pixel_format = V4L2_PIX_FMT_UYVY,
+    .width = 864, .height = 480,
+    .type = V4L2_FRMIVAL_TYPE_DISCRETE,
+    .discrete = { .numerator = 1, .denominator = 25 },
+  },
+  {
+    .index = 5, .buf_type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+    .pixel_format = V4L2_PIX_FMT_UYVY,
+    .width = 864, .height = 480,
+    .type = V4L2_FRMIVAL_TYPE_DISCRETE,
+    .discrete = { .numerator = 1, .denominator = 20 },
+  },
+  {
+    .index = 6, .buf_type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+    .pixel_format = V4L2_PIX_FMT_UYVY,
+    .width = 864, .height = 480,
     .type = V4L2_FRMIVAL_TYPE_DISCRETE,
     .discrete = { .numerator = 1, .denominator = 15 },
   },
 };
 
-/* Per-rate frame-length registers (page 0: 0x07 high, 0x08 low),
- * extracted from the reference's four 640x480 fps tables. */
+#define GC2145_FMTDESCS_COUNT \
+  (sizeof(g_bk7258_gc2145_fmtdescs) / sizeof(g_bk7258_gc2145_fmtdescs[0]))
 
-struct gc2145_fps_regs
-{
-  uint32_t fps;
-  uint8_t reg07;
-  uint8_t reg08;
-};
-
-static const struct gc2145_fps_regs g_gc2145_fps_regs[] =
-{
-  { 30u, 0x00u, 0xA0u },
-  { 25u, 0x01u, 0x7Au },
-  { 20u, 0x03u, 0x02u },
-  { 15u, 0x05u, 0x50u },
-};
-
-#define GC2145_FPS_COUNT \
-  (sizeof(g_gc2145_fps_regs) / sizeof(g_gc2145_fps_regs[0]))
-
-/* Everything the four fps tables have in common: page select, the fixed
- * 0x05/0x06 pair, then page 1's exposure-window registers.  0x07/0x08
- * are written between these two halves by
- * bk7258_gc2145_set_frame_rate().
- */
-
-static const struct gc2145_reg g_gc2145_fps_prefix[] =
-{
-  { 0xFE, 0x00 }, { 0x05, 0x01 }, { 0x06, 0x56 },
-};
-
-static const struct gc2145_reg g_gc2145_fps_suffix[] =
-{
-  { 0xFE, 0x01 }, { 0x25, 0x01 }, { 0x26, 0x63 },
-  { 0x27, 0x04 }, { 0x28, 0x29 }, { 0x29, 0x04 }, { 0x2A, 0x29 },
-  { 0x2B, 0x04 }, { 0x2C, 0x29 }, { 0x2D, 0x04 }, { 0x2E, 0x29 },
-  { 0xFE, 0x00 },
-};
+#define GC2145_FRMSIZES_COUNT \
+  (sizeof(g_bk7258_gc2145_frmsizes) / sizeof(g_bk7258_gc2145_frmsizes[0]))
 
 #define GC2145_FRMINTERVALS_COUNT \
   (sizeof(g_bk7258_gc2145_frmintervals) / \
    sizeof(g_bk7258_gc2145_frmintervals[0]))
-
-#define GC2145_FPS_PREFIX_COUNT \
-  (sizeof(g_gc2145_fps_prefix) / sizeof(g_gc2145_fps_prefix[0]))
-#define GC2145_FPS_SUFFIX_COUNT \
-  (sizeof(g_gc2145_fps_suffix) / sizeof(g_gc2145_fps_suffix[0]))
 
 static struct bk7258_gc2145_dev_s g_bk7258_gc2145 =
 {
   .sensor =
     {
       .ops = &g_bk7258_gc2145_ops,
-      .fmtdescs_num = 1,
+      .fmtdescs_num = GC2145_FMTDESCS_COUNT,
       .fmtdescs = g_bk7258_gc2145_fmtdescs,
-      .frmsizes_num = 1,
+      .frmsizes_num = GC2145_FRMSIZES_COUNT,
       .frmsizes = g_bk7258_gc2145_frmsizes,
       .frmintervals_num = GC2145_FRMINTERVALS_COUNT,
       .frmintervals = g_bk7258_gc2145_frmintervals,
@@ -1100,43 +1540,91 @@ static void bk7258_gc2145_power_off(void)
   bk7258_gpio_output(DVP_POWER_PIN, false);
 }
 
-/* Programs the frame length for the requested rate.  GC2145 has no
- * dedicated frame-rate register: the rate follows from the frame length
- * (dummy lines) in page-0 registers 0x07/0x08, which is why the
- * reference ships one register table per rate.
- */
+/* Finds the mode entry for a requested geometry, or NULL. */
 
-static bool bk7258_gc2145_set_frame_rate(
-    FAR struct bk7258_gc2145_dev_s *priv, uint32_t fps)
+static FAR const struct gc2145_mode *
+bk7258_gc2145_find_mode(uint16_t width, uint16_t height)
 {
   size_t i;
 
-  for (i = 0; i < GC2145_FPS_COUNT; i++)
+  for (i = 0; i < GC2145_MODE_COUNT; i++)
     {
-      if (g_gc2145_fps_regs[i].fps == fps)
+      if (g_gc2145_modes[i].width == width &&
+          g_gc2145_modes[i].height == height)
         {
-          break;
+          return &g_gc2145_modes[i];
         }
     }
 
-  if (i == GC2145_FPS_COUNT)
+  return NULL;
+}
+
+/* Finds a rate within a mode, or NULL.  A mode with no rate table has
+ * nothing to find: nfps == 0 makes the loop fall straight through.
+ */
+
+static FAR const struct gc2145_fps_mode *
+bk7258_gc2145_find_fps(FAR const struct gc2145_mode *mode, uint32_t fps)
+{
+  size_t i;
+
+  for (i = 0; i < mode->nfps; i++)
+    {
+      if (mode->fps[i].fps == fps)
+        {
+          return &mode->fps[i];
+        }
+    }
+
+  return NULL;
+}
+
+/* Programs one resolution, and the rate to go with it.
+ *
+ * Order matters and is the reference's: the window table first, then the
+ * rate table.  Both halves are needed, and they are not independent -- the
+ * rate tables carry the AEC step ladder as well as the frame length, and
+ * each resolution has its own.  Programming a window table on its own
+ * leaves whatever rate the previous mode had; programming a rate table from
+ * a different resolution sets an exposure ladder for the wrong line time.
+ *
+ * fps == 0 means "no preference": the mode's first rate is used, which is
+ * the fastest one the reference lists for it.
+ *
+ * GC2145 has no frame-rate register.  The rate follows from the frame length
+ * (dummy lines) in page-0 0x07/0x08, which is why the reference ships one
+ * register table per rate rather than a divider.
+ */
+
+static bool bk7258_gc2145_apply_mode(
+    FAR struct bk7258_gc2145_dev_s *priv,
+    FAR const struct gc2145_mode *mode, uint32_t fps)
+{
+  FAR const struct gc2145_fps_mode *rate = NULL;
+
+  if (mode->nfps > 0)
+    {
+      rate = (fps == 0) ? &mode->fps[0] :
+                          bk7258_gc2145_find_fps(mode, fps);
+      if (rate == NULL)
+        {
+          return false;
+        }
+    }
+
+  if (!bk7258_gc2145_write_reg_table(mode->regs, mode->nregs))
     {
       return false;
     }
 
-  if (!bk7258_gc2145_write_reg_table(g_gc2145_fps_prefix,
-                                     GC2145_FPS_PREFIX_COUNT) ||
-      !bk7258_i2c1_write_reg(GC2145_I2C_ADDR, 0x07u,
-                             g_gc2145_fps_regs[i].reg07) ||
-      !bk7258_i2c1_write_reg(GC2145_I2C_ADDR, 0x08u,
-                             g_gc2145_fps_regs[i].reg08) ||
-      !bk7258_gc2145_write_reg_table(g_gc2145_fps_suffix,
-                                     GC2145_FPS_SUFFIX_COUNT))
+  if (rate != NULL &&
+      !bk7258_gc2145_write_reg_table(rate->regs, rate->nregs))
     {
       return false;
     }
 
-  priv->current_fps = fps;
+  priv->mode = mode;
+  priv->current_fps = (rate != NULL) ? rate->fps : 0;
   return true;
 }
 
@@ -1232,28 +1720,29 @@ static int bk7258_gc2145_init(FAR struct imgsensor_s *sensor)
     }
 
   printf("bk7258_camera_imgsensor: init: init register table write OK, "
-         "writing %u resolution registers\n",
-         (unsigned int)GC2145_640_480_REG_COUNT);
+         "writing the %ux%u mode\n",
+         (unsigned int)g_gc2145_modes[GC2145_DEFAULT_MODE].width,
+         (unsigned int)g_gc2145_modes[GC2145_DEFAULT_MODE].height);
 
-  if (!bk7258_gc2145_write_reg_table(g_gc2145_640_480_regs,
-                                      GC2145_640_480_REG_COUNT))
+  /* A mode is programmed here, not left until start_capture(), because the
+   * sensor streams continuously once initialised: without a window table it
+   * would be driving the DVP bus with whatever geometry the init table
+   * leaves behind.  start_capture() reprograms it if the application asked
+   * for something else.
+   */
+
+  if (!bk7258_gc2145_apply_mode(priv,
+                                &g_gc2145_modes[GC2145_DEFAULT_MODE],
+                                GC2145_FPS_DEFAULT))
     {
-      printf("bk7258_camera_imgsensor: init: resolution register table "
-             "write FAILED\n");
+      printf("bk7258_camera_imgsensor: init: mode program FAILED\n");
       bk7258_gc2145_power_off();
       return -EIO;
     }
 
-  if (!bk7258_gc2145_set_frame_rate(priv, GC2145_FPS_DEFAULT))
-    {
-      printf("bk7258_camera_imgsensor: init: %ufps program FAILED\n",
-             (unsigned int)GC2145_FPS_DEFAULT);
-      bk7258_gc2145_power_off();
-      return -EIO;
-    }
-
-  printf("bk7258_camera_imgsensor: init: complete at %ufps, sensor now "
-         "continuously outputting DVP signal\n",
+  printf("bk7258_camera_imgsensor: init: complete at %ux%u %ufps, sensor "
+         "now continuously outputting DVP signal\n",
+         (unsigned int)priv->mode->width, (unsigned int)priv->mode->height,
          (unsigned int)priv->current_fps);
 
   priv->initialized = true;
@@ -1285,43 +1774,68 @@ static int bk7258_gc2145_validate_frame_setting(
     uint8_t nr_datafmts, FAR imgsensor_format_t *datafmts,
     FAR imgsensor_interval_t *interval)
 {
+  FAR struct bk7258_gc2145_dev_s *priv =
+      (FAR struct bk7258_gc2145_dev_s *)sensor;
+  FAR const struct gc2145_mode *mode;
+
   if (nr_datafmts < 1)
     {
       return -EINVAL;
     }
 
-  /* Only 640x480 UYVY is supported -- this driver's register tables do
-   * not implement any other resolution, and UYVY is the byte order the
-   * capture path actually produces (see g_bk7258_gc2145_fmtdescs).
+  /* The geometry must be one of the modes this driver carries a register
+   * table for, and the format must be the byte order the capture path
+   * actually produces (see g_bk7258_gc2145_fmtdescs).
    */
 
-  if (datafmts[IMGSENSOR_FMT_MAIN].width != GC2145_CAPTURE_WIDTH ||
-      datafmts[IMGSENSOR_FMT_MAIN].height != GC2145_CAPTURE_HEIGHT ||
-      datafmts[IMGSENSOR_FMT_MAIN].pixelformat != IMGSENSOR_PIX_FMT_UYVY)
+  /* Both formats come off the same sensor at the same geometry: the encoder
+   * sits behind the capture module, so the sensor side does not care which
+   * of the two the application asked for.
+   */
+
+  if (datafmts[IMGSENSOR_FMT_MAIN].pixelformat != IMGSENSOR_PIX_FMT_UYVY &&
+      datafmts[IMGSENSOR_FMT_MAIN].pixelformat != IMGSENSOR_PIX_FMT_JPEG)
     {
       return -EINVAL;
     }
 
-  /* A requested frame rate must be one this driver can actually
-   * program; silently accepting an arbitrary rate and then running at a
-   * different one is what made the `30` in `stream 640 480 30` a lie.
+  mode = bk7258_gc2145_find_mode(datafmts[IMGSENSOR_FMT_MAIN].width,
+                                 datafmts[IMGSENSOR_FMT_MAIN].height);
+  if (mode == NULL)
+    {
+      return -EINVAL;
+    }
+
+  /* Frame rate.  This needs care, because the same op serves two ioctls
+   * that mean different things by the interval argument:
+   *
+   *   VIDIOC_S_PARM validates the *requested* rate against the format that
+   *   is already set.  Here the rate is the application's request and a rate
+   *   this driver cannot program must be rejected -- silently accepting 30
+   *   and running at 20 is what made the `30` in `stream 640 480 30` a lie.
+   *
+   *   VIDIOC_S_FMT validates the *new* format against the rate left over
+   *   from before.  Here the interval is not a request at all; the
+   *   application is changing geometry and has said nothing about the rate.
+   *   Rejecting then makes a legal switch impossible: after streaming
+   *   640x480 at 30, no application could select 864x480 (25/20/15) without
+   *   knowing to set the rate first, and nxcamera issues S_FMT before
+   *   S_PARM.
+   *
+   * The two are told apart by whether the geometry is the one already
+   * programmed.  When it is not, the rate is stale baggage: the format is
+   * accepted and start_capture() programs the mode's fastest rate, printing
+   * what it chose.  VIDIOC_G_PARM then reports the real value, so nothing
+   * is claimed that the hardware is not doing.
    */
 
-  if (interval != NULL && interval->denominator != 0)
+  if (interval != NULL && interval->denominator != 0 &&
+      mode == priv->mode)
     {
       uint32_t fps = interval->denominator / (interval->numerator ?
                                              interval->numerator : 1);
-      size_t i;
 
-      for (i = 0; i < GC2145_FPS_COUNT; i++)
-        {
-          if (g_gc2145_fps_regs[i].fps == fps)
-            {
-              break;
-            }
-        }
-
-      if (i == GC2145_FPS_COUNT)
+      if (bk7258_gc2145_find_fps(mode, fps) == NULL)
         {
           return -EINVAL;
         }
@@ -1337,6 +1851,8 @@ static int bk7258_gc2145_start_capture(
 {
   FAR struct bk7258_gc2145_dev_s *priv =
       (FAR struct bk7258_gc2145_dev_s *)sensor;
+  FAR const struct gc2145_mode *mode;
+  uint32_t fps = 0;
   int ret;
 
   printf("bk7258_camera_imgsensor: start_capture: entry\n");
@@ -1350,23 +1866,57 @@ static int bk7258_gc2145_start_capture(
       return ret;
     }
 
-  /* Apply the requested frame rate if it differs from what is already
-   * programmed.  validate_frame_setting() above has already rejected
-   * rates this driver cannot produce.
+  /* Apply the requested mode.  validate_frame_setting() above has already
+   * rejected geometries and rates this driver cannot produce, so a failure
+   * here is an I2C fault rather than a bad request.
+   *
+   * Reprogrammed only when something actually changed: the window and rate
+   * tables together are 50-60 I2C register writes at ~100kHz bitbang, and
+   * the common case (streaming the mode that is already programmed) should
+   * not pay for them.
    */
+
+  mode = bk7258_gc2145_find_mode(datafmts[IMGSENSOR_FMT_MAIN].width,
+                                 datafmts[IMGSENSOR_FMT_MAIN].height);
+  if (mode == NULL)
+    {
+      return -EINVAL;
+    }
 
   if (interval != NULL && interval->denominator != 0)
     {
-      uint32_t fps = interval->denominator / (interval->numerator ?
-                                             interval->numerator : 1);
+      fps = interval->denominator / (interval->numerator ?
+                                     interval->numerator : 1);
+    }
 
-      if (fps != priv->current_fps &&
-          !bk7258_gc2145_set_frame_rate(priv, fps))
+  /* A rate carried over from a different resolution may not exist at this
+   * one (see validate_frame_setting()).  Drop to the mode's fastest rather
+   * than refusing to stream, and print it, so the log always shows the rate
+   * that is really programmed.
+   */
+
+  if (fps != 0 && mode->nfps > 0 &&
+      bk7258_gc2145_find_fps(mode, fps) == NULL)
+    {
+      printf("bk7258_camera_imgsensor: start_capture: %ufps not available "
+             "at %ux%u, using %ufps\n", (unsigned int)fps,
+             (unsigned int)mode->width, (unsigned int)mode->height,
+             (unsigned int)mode->fps[0].fps);
+      fps = 0;
+    }
+
+  if (mode != priv->mode || (fps != 0 && fps != priv->current_fps))
+    {
+      if (!bk7258_gc2145_apply_mode(priv, mode, fps))
         {
-          printf("bk7258_camera_imgsensor: start_capture: %ufps program "
-                 "FAILED\n", (unsigned int)fps);
+          printf("bk7258_camera_imgsensor: start_capture: %ux%u @ %ufps "
+                 "program FAILED\n", (unsigned int)mode->width,
+                 (unsigned int)mode->height, (unsigned int)fps);
           return -EIO;
         }
+
+      printf("bk7258_camera_imgsensor: start_capture: mode set to %ux%u\n",
+             (unsigned int)mode->width, (unsigned int)mode->height);
     }
 
   /* GC2145 has no separate streaming-enable register in this driver's
@@ -1376,8 +1926,9 @@ static int bk7258_gc2145_start_capture(
    * (YUV_BUF) is listening.
    */
 
-  printf("bk7258_camera_imgsensor: start_capture: OK at %ufps (sensor "
+  printf("bk7258_camera_imgsensor: start_capture: OK at %ux%u %ufps (sensor "
          "streaming continuously since init)\n",
+         (unsigned int)priv->mode->width, (unsigned int)priv->mode->height,
          (unsigned int)priv->current_fps);
 
   return OK;
