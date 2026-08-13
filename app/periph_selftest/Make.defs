@@ -3,5 +3,5 @@
 ############################################################################
 
 ifneq ($(CONFIG_LVX_USE_DEMO_CONTEST2026_264_PERIPH_SELFTEST),)
-CONFIGURED_APPS += $(APPDIR)/packages/demos/contest2026_264_hello_app
+CONFIGURED_APPS += $(APPDIR)/packages/demos/contest2026_264_periph_selftest
 endif

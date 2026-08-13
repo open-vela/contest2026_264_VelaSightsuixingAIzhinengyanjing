@@ -13,3 +13,6 @@ config LVX_USE_DEMO_CONTEST2026_264_PERIPH_SELFTEST
 		is online and read/write-consistent, and that systick advances.
 		Each check prints its own PASS/FAIL line and the command ends with
 		a failure count.
+
+		The point is that a bring-up regression shows up as a named failing
+		check instead of a missing device node somebody has to notice.

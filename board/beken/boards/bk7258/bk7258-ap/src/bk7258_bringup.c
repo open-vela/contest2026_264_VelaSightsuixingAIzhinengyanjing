@@ -136,22 +136,32 @@ int bk7258_bringup(void)
  * Name: bk7258_report_cache
  *
  * Description:
- *   Reports whether this core implements instruction and data caches.
+ *   Reports whether this core implements instruction and data caches, and is
+ *   left in at boot so the next person does not have to guess.
  *
- *   The AP executes in place from flash at 0x02150000 and NuttX never enables
- *   a cache: CONFIG_ARMV8M_ICACHE depends on ARMV8M_HAVE_ICACHE, which the
- *   BK7258 chip Kconfig does not select, so setting it in a defconfig is
- *   silently dropped.  That matters because measured throughput here is what
- *   you would expect from uncached instruction fetch out of QSPI flash: the
- *   expression renderer costs ~450ms per frame for work that takes 0.09ms on
- *   a host, a 51200-byte word-at-a-time copy runs at 0.8MB/s, and raising the
- *   core to 480MHz changed none of it.
+ *   The AP executes in place from flash at 0x02150000.  NuttX did not enable
+ *   the instruction cache until commit "perf(bk7258): enable the AP
+ *   instruction cache", and every instruction fetch was a flash access: the
+ *   expression renderer cost ~455ms per frame for work that takes 0.09ms on a
+ *   host, a 51200-byte word-at-a-time copy ran at 0.8MB/s, and raising the
+ *   core to 480MHz changed none of it because the core was never the limit.
+ *   The same frame now costs 37ms.
  *
- *   Whether the cache can be turned on is not obvious from the vendor tree:
- *   bk7258.defconfig sets CONFIG_CACHE_ENABLE=n and their cache.c guards
- *   every D-cache operation with a runtime CLIDR test.  CLIDR/CTR exist in
- *   ARMv8-M whether or not a cache is fitted (they read zero when it is not),
- *   so reading them is safe and settles the question.
+ *   Turning it on needed two independent fixes, and the first one alone looks
+ *   like "the cache does nothing": CONFIG_ARMV8M_ICACHE depends on the hidden
+ *   ARMV8M_HAVE_ICACHE, which this chip's Kconfig did not select, so asking
+ *   for it in a defconfig was silently dropped; and selecting it only compiles
+ *   up_enable_icache() in -- every other ARMv8-M chip in the tree calls that
+ *   from its own start code, this one did not.  Both are fixed now (see the
+ *   chip Kconfig and bk7258_start.c).
+ *
+ *   Only the I-Cache is on.  Instruction fetch is read-only and needs no
+ *   maintenance against the camera, panel and mailbox DMA that shares AP RAM,
+ *   which the MPU deliberately keeps non-cacheable.
+ *
+ *   CLIDR/CTR exist in ARMv8-M whether or not a cache is fitted (they read
+ *   zero when it is not), so reading them is safe and settles the question:
+ *   this part reports CLIDR=0x09200003, i.e. both caches are implemented.
  *
  ****************************************************************************/
 
