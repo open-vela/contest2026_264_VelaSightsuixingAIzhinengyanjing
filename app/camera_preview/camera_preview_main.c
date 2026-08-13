@@ -43,6 +43,8 @@
  *   camera_preview [N] [options]        live preview, N frames (0 = forever)
  *   camera_preview fill <hex> [options] static patterns, no camera involved
  *   camera_preview pattern|bars|grid [options]
+ *   camera_preview face [name] [frames] [fps=N]
+ *                                       draw an expression; no name lists them
  *
  * Options:
  *   fb=0 | fb=1 | fb=both   which panel(s) to drive (default both)
@@ -59,6 +61,8 @@
 #include <nuttx/config.h>
 
 #include <sys/ioctl.h>
+
+#include <signal.h>
 #include <sys/mman.h>
 #include <sys/time.h>
 #include <fcntl.h>
@@ -71,6 +75,8 @@
 
 #include <nuttx/video/fb.h>
 #include <sys/videoio.h>
+
+#include "preview_face.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -302,6 +308,80 @@ static void preview_build_tone(void)
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
+
+/* Set from the SIGINT handler; the capture loop polls it.
+ *
+ * Live preview has no frame limit (`camera_preview` with no count runs until
+ * stopped), so Ctrl-C is the only way out, and simply being killed is not
+ * good enough: the exit path has to reach preview_cleanup(), which issues
+ * VIDIOC_STREAMOFF, munmaps the buffers and releases them with REQBUFS(0).
+ * Skipping that leaves the sensor streaming and the PSRAM buffer heap
+ * allocated -- and that heap is larger than the AP's whole kernel heap.
+ *
+ * Two things are needed for Ctrl-C to arrive at all, and both were missing
+ * before: CONFIG_TTY_SIGINT (which was set) delivers SIGINT to the pid NSH
+ * registers with TIOCSCTTY, and CONFIG_SIG_DEFAULT (which was NOT set)
+ * supplies the default action.  Without the latter a process that installs
+ * no handler simply ignores the signal, which is why an earlier Ctrl-C probe
+ * (app/hello_app, `ctrlc_test`) appeared to work -- it installs a handler --
+ * while this loop did not.  Installing a handler here means the exit no
+ * longer depends on that config at all.
+ */
+
+static volatile sig_atomic_t g_stop;
+static bool g_ctty_claimed;
+
+static void preview_sigint(int signo)
+{
+  (void)signo;
+  g_stop = 1;
+}
+
+/****************************************************************************
+ * Name: preview_claim_ctty
+ *
+ * Description:
+ *   Registers this task as the console's controlling terminal, so that a
+ *   0x03 on the wire turns into a SIGINT delivered here.
+ *
+ *   This is not something an application would normally have to do -- NSH is
+ *   supposed to do it for the foreground task (nsh_builtin.c calls
+ *   TIOCSCTTY with the child pid before waitpid).  On this board it does not
+ *   happen: measured with app/hello_app's probe, TIOCSCTTY from inside a
+ *   freshly started builtin returns 0, i.e. the terminal was still
+ *   *unclaimed*.  uart_check_special() requires dev->pid > 0, so without
+ *   this call no amount of Ctrl-C produces a signal, which is exactly why
+ *   the preview could not be stopped.  Why NSH skips it is still open; the
+ *   probe reports it in one line and is worth re-running after any NSH or
+ *   serial change.
+ *
+ *   Claiming it also has to be undone (preview_release_ctty), because
+ *   drivers/serial/serial.c refuses to move an already-set owner: a second
+ *   TIOCSCTTY returns -EINVAL.  Leaving it set would point SIGINT at a dead
+ *   pid and break the *next* run.
+ *
+ ****************************************************************************/
+
+static void preview_claim_ctty(void)
+{
+  if (ioctl(STDIN_FILENO, TIOCSCTTY, (unsigned long)getpid()) == 0)
+    {
+      g_ctty_claimed = true;
+    }
+  else if (errno != EINVAL)
+    {
+      printf("preview: TIOCSCTTY failed: %d (Ctrl-C may not work)\n", errno);
+    }
+}
+
+static void preview_release_ctty(void)
+{
+  if (g_ctty_claimed)
+    {
+      ioctl(STDIN_FILENO, TIOCNOTTY, 0);
+      g_ctty_claimed = false;
+    }
+}
 
 static uint32_t now_ms(void)
 {
@@ -1369,10 +1449,208 @@ static int preview_push_all(FAR struct preview_s *p,
   return ret;
 }
 
+/****************************************************************************
+ * Name: preview_run_face
+ *
+ * Description:
+ *   Draws an expression from preview_face.c.  Like the pattern modes this
+ *   never opens the camera, so it works when the capture path is broken or
+ *   absent.
+ *
+ *   Both panels show the same face, so the frame is rendered once into
+ *   fbmem[0] and memcpy'd to the others: a 51200-byte copy costs far less
+ *   than a second pass of the renderer.  The frame rate is then set by the
+ *   panel bus (~27-32ms per panel per frame), which is why the default is
+ *   10fps rather than something the renderer could sustain.
+ *
+ ****************************************************************************/
+
+static int preview_run_face(FAR struct preview_s *p, int argc,
+                            FAR char *argv[], int want_fb)
+{
+  struct fb_area_s area;
+  FAR const char *name = NULL;
+  uint32_t max_frames = 0;
+  uint32_t fps = 5;
+  uint32_t period;
+  uint32_t frames = 0;
+  uint32_t render_ms = 0;
+  uint32_t push_ms = 0;
+  uint32_t start;
+  uint32_t dur;
+  int idx;
+  int i;
+  int ret;
+
+  /* argv[1] is "face".  The first remaining argument that is neither a
+   * number nor an option is the expression name; the shared options
+   * (fb=, mx, ...) have already been consumed by main().
+   */
+
+  for (i = 2; i < argc; i++)
+    {
+      if (strncmp(argv[i], "fps=", 4) == 0)
+        {
+          int v = atoi(argv[i] + 4);
+
+          if (v > 0 && v <= 60)
+            {
+              fps = (uint32_t)v;
+            }
+        }
+      else if (argv[i][0] >= '0' && argv[i][0] <= '9')
+        {
+          max_frames = (uint32_t)atoi(argv[i]);
+        }
+      else if (name == NULL && strchr(argv[i], '=') == NULL &&
+               strcmp(argv[i], "mx") != 0 && strcmp(argv[i], "my") != 0 &&
+               strcmp(argv[i], "rot180") != 0 &&
+               strcmp(argv[i], "swap") != 0)
+        {
+          name = argv[i];
+        }
+    }
+
+  if (name == NULL)
+    {
+      printf("camera_preview face <name> [frames] [fps=N] "
+             "(default 5fps)\n");
+
+      for (i = 0; i < preview_face_count(); i++)
+        {
+          uint32_t d = preview_face_duration_ms(i);
+
+          printf("  %-9s %s", preview_face_name(i),
+                 d ? "animated" : "static  ");
+          if (d)
+            {
+              printf(" %ums loop", (unsigned int)d);
+            }
+
+          printf("\n");
+        }
+
+      return OK;
+    }
+
+  idx = preview_face_lookup(name);
+  if (idx < 0)
+    {
+      printf("preview: no expression called '%s' "
+             "(run 'camera_preview face' for the list)\n", name);
+      return -EINVAL;
+    }
+
+  ret = preview_open_fb(p, want_fb);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  area.x = 0;
+  area.y = 0;
+  area.w = p->vinfo.xres;
+  area.h = p->vinfo.yres;
+
+  dur    = preview_face_duration_ms(idx);
+  period = 1000 / fps;
+
+  printf("preview: face '%s' on %d panel(s), %s",
+         preview_face_name(idx), p->nfb, dur ? "animated" : "static");
+  if (dur)
+    {
+      printf(", %ums loop at %ufps, Ctrl-C to stop",
+             (unsigned int)dur, (unsigned int)fps);
+    }
+
+  printf("\n");
+
+  if (dur)
+    {
+      struct sigaction act;
+
+      memset(&act, 0, sizeof(act));
+      act.sa_handler = preview_sigint;
+      sigemptyset(&act.sa_mask);
+
+      if (sigaction(SIGINT, &act, NULL) < 0)
+        {
+          printf("preview: sigaction failed: %d (Ctrl-C will not be "
+                 "clean)\n", errno);
+        }
+
+      preview_claim_ctty();
+    }
+
+  start = now_ms();
+
+  for (; ; )
+    {
+      uint32_t t0 = now_ms();
+      uint32_t t1;
+      uint32_t spent;
+
+      preview_face_render(p->fbmem[0], p->pinfo.stride,
+                          (int)p->vinfo.xres, (int)p->vinfo.yres,
+                          idx, dur ? t0 - start : 0);
+
+      for (i = 1; i < p->nfb; i++)
+        {
+          /* Word-at-a-time rather than memcpy(): a 51200-byte memcpy of this
+           * framebuffer measured 65ms on the board, which is slower than the
+           * QSPI push of the same bytes.  The copy is the only place where
+           * the renderer reads the framebuffer back, so it is worth doing by
+           * hand.
+           */
+
+          FAR uint32_t *dst = (FAR uint32_t *)(void *)p->fbmem[i];
+          FAR const uint32_t *src = (FAR const uint32_t *)
+                                    (const void *)p->fbmem[0];
+          size_t words = p->pinfo.fblen / 4;
+          size_t w;
+
+          for (w = 0; w < words; w++)
+            {
+              dst[w] = src[w];
+            }
+        }
+
+      t1 = now_ms();
+      render_ms += t1 - t0;
+      preview_push_all(p, &area);
+      push_ms += now_ms() - t1;
+      frames++;
+
+      if (dur == 0 || g_stop ||
+          (max_frames != 0 && frames >= max_frames))
+        {
+          break;
+        }
+
+      spent = now_ms() - t0;
+      if (spent < period)
+        {
+          usleep((period - spent) * 1000);
+        }
+    }
+
+  printf("preview: face done, %u frame(s), render=%ums/f push=%ums/f\n",
+         (unsigned int)frames, (unsigned int)(render_ms / frames),
+         (unsigned int)(push_ms / frames));
+
+  return OK;
+}
+
 static void preview_cleanup(FAR struct preview_s *p)
 {
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   int i;
+
+  /* Hand the terminal back before anything else: it must not stay pointed at
+   * this pid once the task is gone (see preview_claim_ctty).
+   */
+
+  preview_release_ctty();
 
   if (p->camfd >= 0)
     {
@@ -1418,11 +1696,21 @@ int main(int argc, FAR char *argv[])
   uint32_t t_start;
   uint32_t t0;
   bool pattern_mode = false;
+  bool face_mode = false;
   bool bench_mode = false;
   bool stats_mode = false;
   int want_fb = -1;               /* -1 = every registered panel */
   int i;
   int ret;
+
+  /* NuttX's flat build keeps a builtin application's static storage across
+   * invocations, so g_stop survives from one 'camera_preview' to the next.
+   * Leaving it set is what made every animated expression report
+   * "1 frame(s)" after the first Ctrl-C of the boot: the render loop broke
+   * on a stop flag left over from a previous run.
+   */
+
+  g_stop = 0;
 
   for (i = 1; i < argc; i++)
     {
@@ -1509,6 +1797,10 @@ int main(int argc, FAR char *argv[])
         {
           pattern_mode = true;
         }
+      else if (strcmp(argv[1], "face") == 0)
+        {
+          face_mode = true;
+        }
       else if (strcmp(argv[1], "bench") == 0)
         {
           bench_mode = true;
@@ -1529,6 +1821,12 @@ int main(int argc, FAR char *argv[])
   /* Pattern mode never touches the camera: it is meant to be usable when
    * the capture path is the thing under suspicion.
    */
+
+  if (face_mode)
+    {
+      ret = preview_run_face(&p, argc, argv, want_fb);
+      goto out;
+    }
 
   if (pattern_mode)
     {
@@ -1578,6 +1876,29 @@ int main(int argc, FAR char *argv[])
     {
       goto out;
     }
+
+  /* From here on the hardware is streaming, so an exit must go through
+   * preview_cleanup().  SA_RESTART is deliberately not set: the loop only
+   * needs the flag, and DQBUF is not interruptible anyway (it waits in
+   * nxsem_wait_uninterruptible), so the flag is noticed when the next frame
+   * or the driver's 500ms watchdog completes a buffer.
+   */
+
+  {
+    struct sigaction act;
+
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = preview_sigint;
+    sigemptyset(&act.sa_mask);
+
+    if (sigaction(SIGINT, &act, NULL) < 0)
+      {
+        printf("preview: sigaction failed: %d (Ctrl-C will not be clean)\n",
+               errno);
+      }
+  }
+
+  preview_claim_ctty();
 
   if (ioctl(p.camfd, VIDIOC_STREAMON, (uintptr_t)&type) < 0)
     {
@@ -1692,6 +2013,12 @@ int main(int argc, FAR char *argv[])
       if (ioctl(p.camfd, VIDIOC_QBUF, (uintptr_t)&buf) < 0)
         {
           printf("preview: VIDIOC_QBUF failed: %d\n", errno);
+          break;
+        }
+
+      if (g_stop)
+        {
+          printf("preview: interrupted\n");
           break;
         }
 

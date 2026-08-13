@@ -1,0 +1,21 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config LVX_USE_DEMO_CONTEST2026_264_AGENT_CAMERA
+	bool "ai_agent camera-path bench"
+	default n
+	depends on VIDEO
+	---help---
+		Runs the V4L2 half of packages/ai_agent's camera_capture tool
+		(src/tools/tool_camera.c) on this board: same ioctl order, same
+		V4L2_MEMORY_MMAP buffers, same JPEG-then-ENTROPY fallback, same
+		5s poll timeout -- but it validates the JPEG markers and can
+		write the frame to a file instead of posting it to a Vision LLM,
+		which the AP core cannot reach while it has no network device.
+
+		Use it to tell the two failure modes apart: a JPEG capture path
+		that does not deliver frames, versus a geometry the tool asks
+		for that this driver does not program (it wants 320x180 or
+		1280x720; the driver has 480x480 / 640x480 / 864x480).

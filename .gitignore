@@ -31,3 +31,19 @@ board/beken/chips/bk7258/sim_tests
 
 # Local scratch notes, not for submission
 docs/
+
+# ============================================================
+# Code map (codemap/ is an Obsidian vault)
+#
+# 生成产物 codemap/generated/ 是**提交**的：它是给人和 AI 读的地图，
+# 而且提交它才能靠 git diff 看出代码变化带来的地图变化。
+# 这里忽略的只有本机私有的编辑器/缓存产物。
+# 校验是否过期：sh codemap/_tools/check_codemap.sh
+# ============================================================
+codemap/.obsidian/
+codemap/.trash/
+codemap/.smart-env/
+codemap/_tools/__pycache__/
+
+# 代码地图产物（UX 测试期，仅本地）
+codemap/
