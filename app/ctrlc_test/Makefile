@@ -1,14 +1,14 @@
 ############################################################################
-# BK7258 peripheral self-test - Makefile
+# BK7258 UART Ctrl-C test - Makefile
 ############################################################################
 
 include $(APPDIR)/Make.defs
 
-PROGNAME  = periph_selftest
+PROGNAME  = ctrlc_test
 PRIORITY  = SCHED_PRIORITY_DEFAULT
-STACKSIZE = 4096
-MODULE    = $(CONFIG_LVX_USE_DEMO_CONTEST2026_264_PERIPH_SELFTEST)
+STACKSIZE = 2048
+MODULE    = $(CONFIG_LVX_USE_DEMO_CONTEST2026_264_CTRLC_TEST)
 
-MAINSRC = periph_selftest_main.c
+MAINSRC = ctrlc_test_main.c
 
 include $(APPDIR)/Application.mk

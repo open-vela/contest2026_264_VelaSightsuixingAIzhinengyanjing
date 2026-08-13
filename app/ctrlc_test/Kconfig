@@ -1,0 +1,16 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config LVX_USE_DEMO_CONTEST2026_264_CTRLC_TEST
+	bool "BK7258 UART Ctrl-C test"
+	default n
+	---help---
+		Enable the ctrlc_test NSH command: installs a SIGINT handler and
+		waits, so that pressing Ctrl-C on the AP console proves the
+		controlling-terminal signal path works end to end.
+
+		This board's console is not a plain UART -- the AP's characters
+		travel to CP over a mailbox bridge -- so TTY_SIGINT delivery is
+		worth testing on its own rather than assuming it.

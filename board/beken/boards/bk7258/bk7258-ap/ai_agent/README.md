@@ -3,8 +3,20 @@
 What this board needs in order to run `packages/ai_agent`, and which parts of
 that belong here rather than upstream.
 
-Build config: `../configs/ai_agent/defconfig` (the `nsh` baseline plus the
-network stack, mbedTLS, cJSON and the agent itself).
+Build config: `../configs/ai_agent/defconfig` (the current `nsh` baseline --
+which already carries the Wi-Fi driver and the IPv4 stack -- plus mbedTLS,
+cJSON and the agent itself).
+
+Two things `nsh` has and this config deliberately does not: the V4L2 M2M JPEG
+codec (`CONFIG_BK7258_JPEG_ENC`, `/dev/video1`) and on-device libjpeg
+(`CONFIG_LIB_JPEG_TURBO`), and with them the `jpeg_test` command, whose Kconfig
+`depends on BK7258_JPEG_ENC`. **The camera's JPEG path does not need any of
+them** -- capture-side encoding lives in the chip-level
+`board/beken/chips/bk7258/bk7258_jpeg_enc.c`, which is compiled
+unconditionally, and `bk7258_jpeg_enc_write_header` is present in this config's
+`System.map`. `jpeg_test` and the M2M codec exist to exercise the encoder as a
+standalone transcoder; the agent has no use for that, so the config leaves them
+out rather than spending flash on them.
 
 ```sh
 cd <openvela work tree root>
@@ -18,19 +30,30 @@ build warning-free (see "Upstream defects" below). The `nsh` config keeps
 
 ## Measured footprint
 
-From the linker's own report (`-Wl,--print-memory-usage`), config
-`ai_agent`, commit-time measurement:
+From the linker's own report (`-Wl,--print-memory-usage`), both configs
+rebuilt clean at commit `422bef0`, with all six `app/` linkfiles in place (as
+a fresh `repo sync` produces them):
 
-| Region | Used | Size | % |
+| Region | `nsh` | `ai_agent` | Region size |
 |---|---|---|---|
-| FLASH | 601920 B | 1088 KB (`primary_ap_app` 1156k, minus the 34/32 code overhead) | 54.0% |
-| RAM | 96960 B | 336 KB (`AP_RAM` 0x54000) | 28.2% |
-| PSRAM_SECTION | 0 B | 6 MB | 0% |
+| FLASH | 485184 B (43.55%) | 691008 B (62.02%) | 1088 KB (`FLASH` 0x110000) |
+| RAM | 122160 B (35.51%) | 186112 B (54.09%) | 336 KB (`RAM` 0x54000) |
+| PSRAM_SECTION | 0 B | 0 B | 6 MB |
 
-The `nsh` baseline is 230720 B of FLASH, so the agent plus mbedTLS plus the
-network stack costs about 371 KB of flash and leaves roughly 475 KB spare.
-RAM here is the static footprint only; heap use at runtime has not been
-measured yet.
+`ai_agent` leaves 413 KB of flash spare. The gap to `nsh` is 201 KB, but it is
+not a clean "cost of the agent": this config adds mbedTLS, cJSON, the agent and
+`agent_camera`, and drops `jpeg_test`. The Wi-Fi driver and the IPv4 stack are
+in both, which is why the gap is much smaller than the 371 KB this file used to
+record.
+
+Two things make these numbers easy to get wrong, both worth checking before
+quoting them: whether the `app/` linkfiles are present (a missing one silently
+removes that app, `docs/reference/platform.md` §6), and whether the build
+directory was wiped after a defconfig change.
+
+RAM here is the static footprint only, and it is the interesting half: those
+186 KB leave the SRAM heap with a 158 KB arena, which is *not* enough to
+start the agent. See "`ai_agent` itself" below.
 
 ## Camera path
 
@@ -98,7 +121,9 @@ Firmware built from this config, packaged per `docs/reference/camera.md`
 10.2 with the sha256 of `nuttx.bin`, `openvela-ap.bin` and `app1.bin`
 verified equal, flashed with `autoflash.sh -b 1500000`.
 
-The V4L2 path works end to end. Auto geometry, one frame:
+The V4L2 path works end to end. Auto geometry, one frame -- **this transcript
+predates the header fix below**, which is why it reports `SOS=NO`; the ioctl
+sequence, the buffer sizes and the frame rates in it are still current:
 
 ```
 agent_camera: auto-selected 480x480
@@ -112,7 +137,11 @@ agent_camera: NOT a decodable JPEG -- no SOS segment ...
 agent_camera: OK
 ```
 
-33-frame session: 29.78 fps, no dropped frames, no timeouts.
+33-frame session: 29.78 fps, no dropped frames, no timeouts. **Every fps and
+millisecond figure in this file was measured before the 2026-08-13 timebase
+fix and is therefore roughly 2x too high** — the real rate at 480x480 is about
+16 fps (`docs/reference/camera.md` §6.8 and §14.1). The frame counts, byte
+counts and pass/fail results are unaffected; only the time axis was wrong.
 
 > **The bytes were not a decodable JPEG until the header was rebuilt, and
 > this README claimed otherwise for a while.** The encoder emits SOI / APP0 /
@@ -142,9 +171,8 @@ agent_camera: OK
 > applying the same inadequate test. `ffmpeg` makes this worse by
 > "succeeding": it emits a 480x480 PNG that is uniformly **RGB(0,135,0)**,
 > which is just YUV(0,0,0) through BT.601, i.e. no scan data decoded at all.
->
-> So `camera_capture` would today hand a Vision LLM something most decoders
-> reject. The V4L2 plumbing is done; the bitstream is not.
+> That is the lesson worth keeping from this retraction: the acceptance test
+> has to be a real decoder, not a marker scan and not a tool that exits 0.
 
 The patch, before and after, on the tool's own default request:
 
@@ -158,8 +186,9 @@ patched one captures a valid JPEG.
 
 Three frames in one session, first one saved: `bytesused` 13531 / 12535 /
 39915, `wrote 13531 bytes to /mnt/cap.jpg`, `ls -l /mnt` reports `13531
-cap.jpg`. So streaming, buffer rotation and the file write all work — but see
-the retraction above for what those bytes actually contain.
+cap.jpg`. So streaming, buffer rotation and the file write all work. Those
+particular bytes were captured before the header fix, so they were not
+decodable; the path is, since `bk7258_jpeg_enc_write_header()`.
 
 The start-up transient, diagnosed: every session begins with exactly
 `err=3 resets=3 short=1` and then runs clean — the counts do not grow with
@@ -182,27 +211,52 @@ only effect was cost — 29.72 → 25.99 fps. See `docs/reference/camera.md`
 
 ### `ai_agent` itself
 
-Starts and runs on the board. All init phases return 0 and it reaches its
-own prompt in 1.15 s:
+Starts and runs on the board, and reaches its own prompt in 929 ms:
 
 ```
-[agent] [boot +1153ms] AI Agent ready. Type 'help' in NSH for commands.
+[agent] [boot +929ms] AI Agent ready. Type 'help' in NSH for commands.
 vela> heap_info
-Heap: arena=247104 fordblks(free)=47544 uordblks(used)=199560
+Heap: arena=6449416 fordblks(free)=6110144 uordblks(used)=339272
+vela> net_status
+Network connected: yes
 ```
 
-**The heap is the tight resource, not flash.** The agent holds 199 KB of the
-AP's 247 KB kernel heap at idle, leaving 46 KB. A TLS handshake needs tens
-of KB on top of that, so the network work will have to account for this
-before `ask` can be expected to work -- flash, at 54%, is not the
-constraint.
+**That arena is 6.4 MB because the heap now includes PSRAM, and without it the
+agent does not start at all.** When the upstream sync brought the Wi-Fi driver
+and the IPv4 stack in, static RAM went from 97 KB to 186 KB and the SRAM heap
+was left with a 158 KB arena, 27 KB free and a 26312-byte largest block --
+smaller than the agent task's 32768-byte stack (`AGENT_AI_AGENT_STACK` in
+`include/agent_config.h`). The spawn failed and NSH reported it as
+`command not found`, which looks exactly like a missing builtin even though
+`help` lists it. `bk7258_psram_initialize()` now donates the unused tail of
+`PSRAM_SECTION` to the system heap (commit `b96373d`); the layout and what it
+costs -- PSRAM is non-cacheable, so some buffers that used to sit in SRAM got
+slower -- are in `docs/reference/platform.md` §4.
+
+Flash, at 61%, is not the constraint, and since `b96373d` neither is the heap.
 
 Without a mounted `/mnt` the agent still starts; it only loses persistence
-(`[skills] Cannot write skill: /mnt/ai_agent/skills/...`). It does not
-create its data directory tree, so `mkfatfs /dev/ram0` + `mount -t vfat
-/dev/ram0 /mnt` + `mkdir /mnt/ai_agent` has to happen first. With no network
-it degrades cleanly rather than hanging: `[agent] Network timeout — net
-services not started.`
+(`[skills] Cannot write skill: /mnt/ai_agent/skills/...`). Be careful about
+what is actually missing there: the agent *does* create its data directory
+tree, recursively -- `mkdirs()` in `src/infra/config_store.c` and
+`ensure_dir()` in `src/core/memory_store.c` both walk the path. What it cannot
+do is create a filesystem, and `bk7258_ramdisk.c` registers `/dev/ram0`
+deliberately unformatted, so
+
+```sh
+mkfatfs /dev/ram0
+mount -t vfat /dev/ram0 /mnt
+```
+
+is the whole prerequisite -- the `ai_agent/` tree underneath appears by itself
+on the next start. (`mkdir /mnt/ai_agent` by hand, which this file used to
+ask for, was never the missing step.)
+
+One genuine upstream bug lives next to this: `src/agent_main.c` Phase 0
+hardcodes `/data/agent` and even mounts a tmpfs on `/data`, instead of using
+`AGENT_DATA_DIR`. On this board that creates five directories nobody reads,
+and it is harmless only because `config_store_init()` gets the real path
+right. Worth folding into the next upstream patch.
 
 ### Using the JPEG path
 
@@ -256,18 +310,35 @@ Its negotiation is the same algorithm as patch 0001, so `low` versus
 
 ## Network
 
-`ask` and the Vision LLM call cannot work yet: the AP core has no network
-device. On this chip Wi-Fi belongs to CP (`CONFIG_WIFI_ENABLE=y` in
-`bk_avdk_smp/projects/app_ab/cp/config/bk7258/config`, not set for the AP),
-and the stock Armino AP reaches the network through a host driver that
-tunnels to CP over the mailbox channels `MB_CHNL_WIFI_CMD` /
-`MB_CHNL_WIFI_DATA` (`ap/components/bk_wifi_driver/wdrv_ipc.c`,
-`CONFIG_WIFI_VNET_CONTROLLER=y` on both sides). A NuttX network device for
-this board therefore means porting that host driver, which is out of scope
-for the camera work and tracked separately.
+**The AP has a real network device**, so the claim this section used to make --
+no netdev, `CONFIG_NET` with loopback only, porting the host driver is out of
+scope -- is obsolete. `board/beken/chips/bk7258/bk7258_wifi.c` (~2000 lines) is
+a `netdev_lowerhalf_s` STA driver registered as `NET_LL_IEEE80211`, with
+`.connect` / `.disconnect`, `SIOCSIWESSID` plus PSK, paged scan results and
+`CONNECTED` / `DISCONNECTED` events. The CP half of the transport is
+`external/bk_avdk_smp/cp/components/controller_if/cif_wifi_dp.c`. Commits
+`d093016` and `e618a28`.
 
-The config still enables `CONFIG_NET` with loopback only, because the agent
-needs `socket()`, `getifaddrs()` and mbedTLS to link at all.
+The division of labour is the one that was predicted: CP still owns the radio,
+WPA, association, EAPOL and the PHY, and the AP owns STA IPv4 and ARP over the
+mailbox transport.
+
+The config carries `CONFIG_BK7258_WIFI`, IPv4, ARP, TCP, WAPI, ping and DHCP
+renewal. `CONFIG_NETINIT_NETLOCAL=y`, so nothing joins a network at boot --
+either `wapi` from NSH, or the agent's own `set_wifi <ssid> <password>`, which
+saves the credentials so that `wifi_reconnect` works after a reboot.
+
+How far this is actually proven, in this repo:
+
+| Step | Evidence |
+|---|---|
+| scan | `d093016`: "successful on-board Wi-Fi scan" |
+| association + IPv4 | `b96373d`: `net_status` → `Network connected: yes` |
+| TLS / HTTPS | **no record anywhere in this repo.** The agent ships `net_test`, which is a `vela_https_get` to `www.baidu.com:443` -- run it and record the output before trusting anything above it |
+| `ask`, Vision LLM | same: unverified. `camera_capture` hands its JPEG to a Vision LLM, so the camera path's last hop depends on the row above |
+
+Until a network is joined the agent degrades cleanly rather than hanging:
+`[agent] Network timeout — net services not started.`
 
 ## Upstream defects found while porting
 

@@ -323,7 +323,7 @@ static void preview_build_tone(void)
  * registers with TIOCSCTTY, and CONFIG_SIG_DEFAULT (which was NOT set)
  * supplies the default action.  Without the latter a process that installs
  * no handler simply ignores the signal, which is why an earlier Ctrl-C probe
- * (app/hello_app, `ctrlc_test`) appeared to work -- it installs a handler --
+ * (app/ctrlc_test) appeared to work -- it installs a handler --
  * while this loop did not.  Installing a handler here means the exit no
  * longer depends on that config at all.
  */
@@ -347,7 +347,7 @@ static void preview_sigint(int signo)
  *   This is not something an application would normally have to do -- NSH is
  *   supposed to do it for the foreground task (nsh_builtin.c calls
  *   TIOCSCTTY with the child pid before waitpid).  On this board it does not
- *   happen: measured with app/hello_app's probe, TIOCSCTTY from inside a
+ *   happen: measured with app/ctrlc_test's probe, TIOCSCTTY from inside a
  *   freshly started builtin returns 0, i.e. the terminal was still
  *   *unclaimed*.  uart_check_special() requires dev->pid > 0, so without
  *   this call no amount of Ctrl-C produces a signal, which is exactly why

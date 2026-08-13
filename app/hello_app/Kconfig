@@ -3,14 +3,13 @@
 # see the file kconfig-language.txt in the NuttX tools repository.
 #
 
-config LVX_USE_DEMO_CONTEST2026_264_CTRLC_TEST
-	bool "BK7258 UART Ctrl-C test"
-	default n
-	---help---
-		Enable the BK7258 UART controlling-terminal SIGINT test command.
-
 config LVX_USE_DEMO_CONTEST2026_264_PERIPH_SELFTEST
 	bool "BK7258 peripheral self-test"
 	default n
 	---help---
-		Enable the BK7258 peripheral self-test command.
+		Enable the periph_selftest NSH command: checks the wlan0 interface
+		is present, reads /proc/version, /proc/uptime and /proc/meminfo,
+		writes through the mailbox UART (/dev/ttyMB0), verifies that PSRAM
+		is online and read/write-consistent, and that systick advances.
+		Each check prints its own PASS/FAIL line and the command ends with
+		a failure count.

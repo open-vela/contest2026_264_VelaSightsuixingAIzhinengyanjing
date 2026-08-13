@@ -134,16 +134,26 @@ repo sync -c -j8
 
 | 作品形态 | 你的代码放这里             | 系统自动映射到                                 |
 | -------- | -------------------------- | ---------------------------------------------- |
-| 应用     | `app/hello_app/`           | `packages/demos/contest2026_264_hello_app`     |
-| 快应用   | `quickapp/hello_quickapp/` | `packages/apps/contest2026_264_hello_quickapp` |
-| 板级适配 | `board/contest_board/`     | `vendor/openvela/boards/contest2026_264_board` |
+| 应用     | `app/<name>/`              | `packages/demos/contest2026_264_<name>`        |
+| 板级适配 | `board/beken/boards/bk7258/`、`board/beken/chips/bk7258/` | `vendor/beken/boards/bk7258/`、`vendor/beken/chips/bk7258/` |
 
-> 用不到的形态目录可以删掉；新增作品时按同样规则加子目录，并在 `contest2026_264_VelaSightsuixingAIzhinengyanjing.xml` 里补一条 `<linkfile>` 映射即可。**生产仓库（packages/nuttx/vendor 等）零改动。**
+本仓实际映射的七个应用：`ctrlc_test`、`periph_selftest`、`audio_test`、
+`camera_preview`、`jpeg_test`、`agent_camera`、`hello_screen`。组委会模板里的
+`quickapp/hello_quickapp/` 与 `board/contest_board/` 两个样例骨架用不到，已删除，
+对应的 `<linkfile>` 也一并从 manifest 移除。
+
+> 新增作品时按同样规则加子目录，并在 `contest2026_264_VelaSightsuixingAIzhinengyanjing.xml` 里补一条 `<linkfile>` 映射即可。**生产仓库（packages/nuttx/vendor 等）零改动。**
+>
+> ⚠️ **软链和 defconfig 必须成对存在**：`app/<name>/` 只有经 `<linkfile>` 软链进
+> `packages/demos/` 才会被 Kconfig 扫到。软链缺失时，defconfig 里的
+> `CONFIG_LVX_USE_DEMO_CONTEST2026_264_<NAME>=y` 会被**静默丢弃**，app 不进固件而构建
+> 照样"成功"。加完 linkfile 记得 `repo sync`（或本地 `ln -s`）并核对：
+> `grep LVX_USE_DEMO_CONTEST2026 cmake_out/<cfg>/.config`。
 
 建议仓库目录约定（便于评委定位）：
 
 ```text
-app/ | quickapp/ | board/   # 你的作品代码
+app/ | board/               # 你的作品代码
 logs/                       # AI Coding 日志（主动导出后提交，格式见 logs/README.md）
 README.md                   # 作品说明（提交前请改成你自己的，见第六节）
 ```
@@ -172,7 +182,7 @@ cd ..
 ./build.sh <board-config-path> [menuconfig|distclean] [-j8]
 ```
 
-> 具体的 board config 路径、目标产物、模拟器/真机部署方式请以你所在赛道的教程导航为准。本仓 `app/` `quickapp/` `board/` 三个示例骨架对应的 Kconfig 选项可通过 `menuconfig` 启用。
+> 具体的 board config 路径、目标产物、模拟器/真机部署方式请以你所在赛道的教程导航为准。本仓 `app/` 下各应用对应的 Kconfig 选项（`LVX_USE_DEMO_CONTEST2026_264_*`）可通过 `menuconfig` 启用，也已按需写进 `board/beken/boards/bk7258/bk7258-ap/configs/*/defconfig`。
 
 ---
 
@@ -210,7 +220,6 @@ cd ..
 <列出你这个仓里各目录/文件的作用，例如：>
 - `app/xxx/`        — <说明>
 - `board/xxx/`      — <说明>
-- `quickapp/xxx/`   — <说明>
 - `logs/`           — AI Coding 日志
 - `docs/` 或其他    — <说明>
 

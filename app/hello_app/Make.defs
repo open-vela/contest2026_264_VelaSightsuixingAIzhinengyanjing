@@ -1,7 +1,7 @@
 ############################################################################
-# Contest 2026 team 000 hello app - Make.defs
+# BK7258 peripheral self-test - Make.defs
 ############################################################################
 
-ifneq ($(CONFIG_LVX_USE_DEMO_CONTEST2026_000_HELLO_APP),)
-CONFIGURED_APPS += $(APPDIR)/packages/demos/contest2026_000_hello_app
+ifneq ($(CONFIG_LVX_USE_DEMO_CONTEST2026_264_PERIPH_SELFTEST),)
+CONFIGURED_APPS += $(APPDIR)/packages/demos/contest2026_264_hello_app
 endif

@@ -6,12 +6,18 @@
  *
  * Why this exists: the only writable filesystem this board had was tmpfs,
  * whose storage comes from the kernel heap.  CONFIG_RAM_SIZE is 344064
- * bytes and roughly 300KB of that is heap, while one 640x480 YUYV frame is
- * 614400 bytes -- so `output /tmp/frame.yuv 1` could never succeed, the
- * write() always failed with ENOMEM.  This board does, however, have 16MB
- * of PSRAM with a 2.9MB general-purpose AP heap (see bk7258_psram.c), so a
- * RAM disk carved out of PSRAM gives the filesystem enough room for
- * several full frames without touching the kernel heap at all.
+ * bytes and at the time the SRAM heap held roughly 300KB of that, while one
+ * 640x480 YUYV frame is 614400 bytes -- so `output /tmp/frame.yuv 1` could
+ * never succeed, the write() always failed with ENOMEM.  This board does,
+ * however, have 16MB of PSRAM, so a RAM disk carved out of PSRAM gives the
+ * filesystem enough room for several full frames without touching the SRAM
+ * heap at all.
+ *
+ * Since "fix(psram): give the system heap the unused tail of PSRAM_SECTION"
+ * the system heap itself reaches into PSRAM (6.4MB arena), so tmpfs is no
+ * longer categorically too small.  This ramdisk is still the better place for
+ * frame-sized files: it does not compete with task stacks and allocations for
+ * the same free blocks, and its 2MB is bounded and predictable.
  *
  * Usage after boot (the ramdisk is registered but intentionally left
  * unformatted, since its contents are volatile anyway):
