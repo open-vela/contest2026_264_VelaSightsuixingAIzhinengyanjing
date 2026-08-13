@@ -13,6 +13,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
 typedef struct {
 	sys_hw_t *hw;
 } sys_hal_t;
@@ -143,7 +144,6 @@ bk_err_t sys_hal_core_bus_clock_ctrl(uint32_t cksel_core, uint32_t ckdiv_core,ui
 #define sys_hal_set_cpu2_rxevt_sel(param)     sys_ll_set_cpu2_int_halt_clk_op_cpu2_rxevt_sel(param)
 #endif
 bk_err_t sys_hal_set_vdddig_h_vol(uint32_t vol_value);
-uint32_t sys_hal_vddd_h_vol_get(void);
 uint32_t sys_hal_vdddig_h_vol_get(void);
 /*low power feature end*/
 uint32 sys_hal_get_chip_id(void);

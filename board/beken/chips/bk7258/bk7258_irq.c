@@ -17,37 +17,26 @@
 #include "nvic.h"
 
 #include "hardware/bk7258_sysctrl.h"
-#include "bk7258_boottrace.h"
 
 #define DEFPRIORITY32 \
   (NVIC_SYSH_PRIORITY_DEFAULT << 24 | \
    NVIC_SYSH_PRIORITY_DEFAULT << 16 | \
    NVIC_SYSH_PRIORITY_DEFAULT << 8  | \
-    NVIC_SYSH_PRIORITY_DEFAULT)
-
-static inline void bk7258_prioritize_svcall(int priority);
+   NVIC_SYSH_PRIORITY_DEFAULT)
 
 static inline void bk7258_route_irq(int extirq, bool enable)
 {
   uintptr_t regaddr;
   uint32_t bit;
-  int cpu = up_cpu_index();
-
-#ifdef CONFIG_SMP
-  if (cpu == 1 && extirq != BK7258_IRQ_MAILBOX - BK7258_IRQ_FIRST)
-    {
-      return;
-    }
-#endif
 
   if (extirq < 32)
     {
-      regaddr = cpu == 0 ? BK7258_CPU1_IRQ_EN0 : BK7258_CPU2_IRQ_EN0;
+      regaddr = BK7258_CPU1_IRQ_EN0;
       bit = 1u << extirq;
     }
   else
     {
-      regaddr = cpu == 0 ? BK7258_CPU1_IRQ_EN1 : BK7258_CPU2_IRQ_EN1;
+      regaddr = BK7258_CPU1_IRQ_EN1;
       bit = 1u << (extirq - 32);
     }
 
@@ -60,42 +49,6 @@ static inline void bk7258_route_irq(int extirq, bool enable)
       modifyreg32(regaddr, bit, 0);
     }
 }
-
-#ifdef CONFIG_SMP
-void bk7258_irqinitialize_secondary(void)
-{
-  uintptr_t regaddr;
-  int priority_registers;
-  int i;
-
-  for (i = 0; i < BK7258_EXTIRQ_COUNT; i += 32)
-    {
-      putreg32(0xffffffffu, NVIC_IRQ_CLEAR(i));
-      putreg32(0xffffffffu, NVIC_IRQ_CLRPEND(i));
-    }
-
-  putreg32(0, BK7258_CPU2_IRQ_EN0);
-  putreg32(0, BK7258_CPU2_IRQ_EN1);
-  putreg32(0, NVIC_SYSTICK_CTRL);
-
-  putreg32(DEFPRIORITY32, NVIC_SYSH4_7_PRIORITY);
-  putreg32(DEFPRIORITY32, NVIC_SYSH8_11_PRIORITY);
-  putreg32(DEFPRIORITY32, NVIC_SYSH12_15_PRIORITY);
-
-  priority_registers = ((getreg32(NVIC_ICTR) & 0x1f) + 1) * 8;
-  regaddr = NVIC_IRQ0_3_PRIORITY;
-  while (priority_registers-- > 0)
-    {
-      putreg32(DEFPRIORITY32, regaddr);
-      regaddr += 4;
-    }
-
-  bk7258_prioritize_svcall(NVIC_SYSH_SVCALL_PRIORITY);
-  modifyreg32(NVIC_SYSHCON, 0,
-              NVIC_SYSHCON_MEMFAULTENA | NVIC_SYSHCON_BUSFAULTENA |
-              NVIC_SYSHCON_USGFAULTENA | NVIC_SYSHCON_SECUREFAULTENA);
-}
-#endif
 
 static int bk7258_irqinfo(int irq, uintptr_t *regaddr, uint32_t *bit,
                           uintptr_t offset)
@@ -234,12 +187,6 @@ void up_disable_irq(int irq)
 
 void arm_ack_irq(int irq)
 {
-  if (up_cpu_index() == 0 &&
-      bk7258_boottrace_primary_stage() == BK7258_BOOT_CPU2_IRQ_RESTORE)
-    {
-      bk7258_boottrace_detail(2, (uint32_t)irq);
-      bk7258_boottrace_primary(BK7258_BOOT_CPU2_FIRST_IRQ);
-    }
 }
 
 #ifdef CONFIG_ARCH_IRQPRIO

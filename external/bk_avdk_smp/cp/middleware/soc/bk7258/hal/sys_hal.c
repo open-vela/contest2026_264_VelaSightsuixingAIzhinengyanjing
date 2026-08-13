@@ -592,10 +592,6 @@ uint32_t sys_hal_vdddig_h_vol_get()
 {
 	return sys_ll_get_ana_reg9_vcorehsel();
 }
-uint32_t sys_hal_vddd_h_vol_get(void)
-{
-	return sys_ll_get_ana_reg9_vdighsel();
-}
 bk_err_t sys_hal_switch_cpu_bus_freq_high_to_low(pm_cpu_freq_e cpu_bus_freq)
 {
 	bk_err_t ret = BK_OK;

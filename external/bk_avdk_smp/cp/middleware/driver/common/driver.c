@@ -331,7 +331,8 @@ static void ap_bridge_task(beken_thread_arg_t arg)
 					events, ap_bridge_tx_count(),
 					s_ap_bridge.ready_flags);
 			}
-			shell_ap_console_link_down();
+			if (!s_ap_bridge.link_ready)
+				shell_ap_console_link_down();
 		}
 	}
 }

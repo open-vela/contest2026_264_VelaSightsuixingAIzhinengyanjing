@@ -294,9 +294,7 @@ bk_err_t mb_chnl_write(u8 log_chnl, mb_chnl_cmd_t * cmd_buf);
 bk_err_t mb_chnl_ctrl(u8 log_chnl, u8 cmd, void * param);
 
 void mb_chnl_poll(void);
-void mb_chnl_start_service(void);
 bk_err_t mb_chnl_get_diag(u8 peer_cpu, mb_chnl_diag_t *diag);
-void mb_chnl_quiesce(u8 peer_cpu);
 void mb_chnl_recovered(u8 peer_cpu);
 
 

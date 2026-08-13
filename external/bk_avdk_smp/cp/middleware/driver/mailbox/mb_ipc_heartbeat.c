@@ -18,7 +18,6 @@
 #include <os/os.h>
 #include "mb_ipc_cmd.h"
 #include <driver/mailbox_types.h>
-#include <driver/pwr_clk.h>
 #include <modules/pm.h>
 #include <components/ap_console_bridge.h>
 
@@ -272,7 +271,6 @@ static void mb_ipc_task( void *para )
 					if( retry_cnt > 3)
 					{
 						BK_DUMP_OUT("IPC retry to start core%d, retry_cnt:%d\r\n", cpu_x_id, retry_cnt);
-						bk_pm_openvela_mailbox_diag_dump();
 						// restart_cpu_x();
 						break;
 					}

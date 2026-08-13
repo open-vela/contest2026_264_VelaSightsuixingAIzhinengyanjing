@@ -13,13 +13,9 @@
 #include <nuttx/clock.h>
 #include <nuttx/irq.h>
 #include <nuttx/kthread.h>
-#include <nuttx/sched.h>
 #include <nuttx/semaphore.h>
 #include <nuttx/signal.h>
-#include <nuttx/spinlock.h>
 
-#include "bk7258_boottrace.h"
-#include "bk7258_driver.h"
 #include "hardware/bk7258_mbox.h"
 
 #ifndef CONFIG_BK7258_MB_UART0_TXBUFSIZE
@@ -91,21 +87,6 @@ struct mb_uart_control
 };
 
 static struct mb_uart_control g_uart;
-static bool g_worker_created;
-static int g_worker_pid;
-
-static int bind_worker_to_primary(void)
-{
-#ifdef CONFIG_SMP
-  cpu_set_t cpuset;
-
-  CPU_ZERO(&cpuset);
-  CPU_SET(0, &cpuset);
-  return sched_setaffinity(0, sizeof(cpuset), &cpuset);
-#else
-  return OK;
-#endif
-}
 
 _Static_assert(MB_UART_TX_SIZE > BK7258_MB_UART_CHUNK_SIZE &&
                MB_UART_TX_SIZE <= UINT16_MAX,
@@ -174,8 +155,8 @@ static void mb_uart_tx_complete(const struct bk7258_mb_wire_message *ack,
   bool failed;
 
   (void)arg;
-  /* The mailbox transport invokes completion callbacks while holding
-   * g_bk7258_driver_lock.  Do not reacquire the non-recursive SMP lock here.
+  /* The mailbox transport invokes completion callbacks with interrupts
+   * disabled, so this callback updates UART state directly.
    */
   command = ack == NULL ? g_uart.transaction_command :
             bk7258_mb_header_cmd(ack);
@@ -448,31 +429,24 @@ static int send_data_locked(void)
 
 static int mb_uart_worker(int argc, char **argv)
 {
-  int ret;
-
   (void)argc;
   (void)argv;
-  ret = bind_worker_to_primary();
-  if (ret < 0)
-    {
-      return -EXDEV;
-    }
 
   for (;;)
     {
       bk7258_mb_uart_callback_t callback;
       void *callback_arg;
       irqstate_t flags;
+      enum bk7258_mb_link_state link;
 
       (void)nxsem_tickwait_uninterruptible(&g_uart.worker_sem,
                                            MB_UART_WORK_INTERVAL);
       nxsem_reset(&g_uart.worker_sem, 0);
-      flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
+      link = bk7258_mailbox_link_state();
+      flags = up_irq_save();
 
       if (!g_uart.transaction_busy)
         {
-          enum bk7258_mb_link_state link = bk7258_mailbox_link_state();
-
           if (link == BK7258_MB_LINK_PROBING && g_uart.state_pending)
             {
               (void)send_state_locked();
@@ -492,7 +466,7 @@ static int mb_uart_worker(int argc, char **argv)
 
       callback = g_uart.callback;
       callback_arg = g_uart.callback_arg;
-      rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
+      up_irq_restore(flags);
 
       if (callback != NULL)
         {
@@ -535,8 +509,6 @@ int bk7258_mb_uart_init(void)
   g_uart.peer_rts_known = false;
   memset(&g_uart.stats, 0, sizeof(g_uart.stats));
   nxsem_init(&g_uart.worker_sem, 0, 0);
-  g_worker_created = false;
-  g_worker_pid = -1;
 
   ret = bk7258_mailbox_register_rx(BK7258_MB_CHAN_UART0_RX,
                                     mb_uart_receive, NULL);
@@ -544,55 +516,15 @@ int bk7258_mb_uart_init(void)
     {
       return ret;
     }
+  ret = kthread_create("mb-uart0", MB_UART_PRIORITY, 2048,
+                       mb_uart_worker, NULL);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
   g_uart.initialized = true;
   return OK;
-}
-
-int bk7258_mb_uart_worker_start(void)
-{
-  int ret;
-
-  bk7258_boottrace_primary(BK7258_BOOT_UART_WORKER_ENTER);
-
-  if (!g_uart.initialized)
-    {
-      return -EAGAIN;
-    }
-
-  if (!g_worker_created)
-    {
-      bk7258_boottrace_primary(BK7258_BOOT_UART_CREATE_ENTER);
-      /* Early console writes may have posted before this worker existed.
-       * Collapse those stale wakeups; the TX ring and state_pending retain
-       * all work that must actually be processed. */
-
-      nxsem_reset(&g_uart.worker_sem, 0);
-      ret = kthread_create("mb-uart0", MB_UART_PRIORITY, 2048,
-                           mb_uart_worker, NULL);
-      if (ret < 0)
-        {
-          return ret;
-        }
-
-      bk7258_boottrace_primary(BK7258_BOOT_UART_CREATE_RETURN);
-      g_worker_created = true;
-      g_worker_pid = ret;
-    }
-
-  return OK;
-}
-
-int bk7258_mb_uart_worker_activate(void)
-{
-  struct sched_param param;
-
-  if (!g_worker_created || g_worker_pid < 0)
-    {
-      return -EAGAIN;
-    }
-
-  param.sched_priority = MB_UART_PRIORITY;
-  return sched_setparam(g_worker_pid, &param) < 0 ? -errno : OK;
 }
 
 void bk7258_mb_uart_start(void)
@@ -604,10 +536,11 @@ void bk7258_mb_uart_start(void)
       return;
     }
 
-  flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
+  flags = up_irq_save();
   g_uart.state_pending = true;
-  rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
+  up_irq_restore(flags);
   (void)bk7258_mailbox_start_probe();
+  nxsem_post(&g_uart.worker_sem);
 }
 
 void bk7258_mb_uart_request_state(void)
@@ -619,9 +552,9 @@ void bk7258_mb_uart_request_state(void)
       return;
     }
 
-  flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
+  flags = up_irq_save();
   g_uart.state_pending = true;
-  rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
+  up_irq_restore(flags);
   nxsem_post(&g_uart.worker_sem);
 }
 
@@ -642,7 +575,7 @@ ssize_t bk7258_mbox_uart_write(const uint8_t *data, size_t length)
       return 0;
     }
 
-  flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
+  flags = up_irq_save();
   available = tx_free();
   written = length > available ? available : length;
   first = MB_UART_TX_SIZE - g_uart.tx_write;
@@ -665,7 +598,7 @@ ssize_t bk7258_mbox_uart_write(const uint8_t *data, size_t length)
       g_uart.stats.short_writes++;
     }
 
-  rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
+  up_irq_restore(flags);
   if (g_uart.initialized && written != 0)
     {
       nxsem_post(&g_uart.worker_sem);
@@ -687,7 +620,7 @@ ssize_t bk7258_mbox_uart_read(uint8_t *data, size_t length,
       return -EINVAL;
     }
 
-  flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
+  flags = up_irq_save();
   available = rx_count();
   count = length > available ? available : length;
   first = MB_UART_RX_SIZE - g_uart.rx_read;
@@ -715,7 +648,7 @@ ssize_t bk7258_mbox_uart_read(uint8_t *data, size_t length,
       update_local_rts();
     }
 
-  rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
+  up_irq_restore(flags);
   if (g_uart.initialized && count != 0)
     {
       nxsem_post(&g_uart.worker_sem);
@@ -726,37 +659,37 @@ ssize_t bk7258_mbox_uart_read(uint8_t *data, size_t length,
 
 bool bk7258_mbox_uart_rxavailable(void)
 {
-  irqstate_t flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
+  irqstate_t flags = up_irq_save();
   bool available = rx_count() != 0;
-  rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
+  up_irq_restore(flags);
   return available;
 }
 
 bool bk7258_mbox_uart_txready(void)
 {
-  irqstate_t flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
-  bool ready = g_uart.initialized && bk7258_mailbox_link_ready() &&
-               tx_free() != 0;
-  rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
+  bool link_ready = bk7258_mailbox_link_ready();
+  irqstate_t flags = up_irq_save();
+  bool ready = g_uart.initialized && link_ready && tx_free() != 0;
+  up_irq_restore(flags);
   return ready;
 }
 
 bool bk7258_mbox_uart_txempty(void)
 {
-  irqstate_t flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
+  irqstate_t flags = up_irq_save();
   bool empty = tx_count() == 0 && g_uart.tx_inflight == 0 &&
                !g_uart.transaction_busy;
-  rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
+  up_irq_restore(flags);
   return empty;
 }
 
 void bk7258_mbox_uart_rxflowcontrol(bool upper)
 {
-  irqstate_t flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
+  irqstate_t flags = up_irq_save();
 
   g_uart.upper_rts = upper;
   update_local_rts();
-  rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
+  up_irq_restore(flags);
   if (g_uart.initialized)
     {
       nxsem_post(&g_uart.worker_sem);
@@ -766,11 +699,11 @@ void bk7258_mbox_uart_rxflowcontrol(bool upper)
 void bk7258_mbox_uart_set_callback(bk7258_mb_uart_callback_t callback,
                                    void *arg)
 {
-  irqstate_t flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
+  irqstate_t flags = up_irq_save();
 
   g_uart.callback = callback;
   g_uart.callback_arg = arg;
-  rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
+  up_irq_restore(flags);
 }
 
 int bk7258_mbox_uart_flush(unsigned int timeout_ms)
@@ -804,13 +737,13 @@ void bk7258_mbox_uart_dump_stats(void)
   bool local_rts;
   bool peer_rts;
 
-  flags = rspin_lock_irqsave(&g_bk7258_driver_lock);
+  flags = up_irq_save();
   stats = g_uart.stats;
   tx = tx_count();
   rx = rx_count();
   local_rts = g_uart.local_rts;
   peer_rts = g_uart.peer_rts;
-  rspin_unlock_irqrestore(&g_bk7258_driver_lock, flags);
+  up_irq_restore(flags);
 
   printf("mb-uart0: txq=%u rxq=%u rts=%u cts=%u data=%lu/%lu "
          "state=%lu/%lu short=%lu overflow=%lu bad=%lu/%lu/%lu/%lu/%lu "

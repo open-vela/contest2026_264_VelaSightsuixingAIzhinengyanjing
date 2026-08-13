@@ -196,9 +196,6 @@ static bk_err_t low_pwr_core_message_handle(void)
 				{
 					uint32_t cp_pm_data = 0;
 					pm_ap_get_cp_data_type_e data_type = msg.param1;
-					pm_openvela_diag_t diag;
-
-					bk_pm_openvela_diag_get(&diag);
 					switch(data_type)
 					{
 						case PM_CP_DATE_TYPE_TIME_INTERVAL_FROM_STARTUP:
@@ -210,30 +207,6 @@ static bk_err_t low_pwr_core_message_handle(void)
 						case PM_CP_DATE_TYPE_EXIT_LOW_VOL_WAKEUP_SOURCE:
 							cp_pm_data =  bk_pm_exit_low_vol_wakeup_source_get();
 						break;
-						case PM_CP_DATE_TYPE_CURRENT_FREQUENCY:
-							cp_pm_data = (diag.cpu1_vote & 0xff) |
-								((diag.max_vote & 0xff) << 8);
-						break;
-						case PM_CP_DATE_TYPE_CLOCK_DIVIDER:
-							cp_pm_data = diag.clk_div_reg0;
-						break;
-						case PM_CP_DATE_TYPE_CPU_SPEED:
-							cp_pm_data = (diag.cpu_speed[0] & 0xff) |
-								((diag.cpu_speed[1] & 0xff) << 8) |
-								((diag.cpu_speed[2] & 0xff) << 16);
-						break;
-						case PM_CP_DATE_TYPE_VOLTAGE:
-							cp_pm_data = (diag.vddd & 0xffff) |
-								((diag.vdddig & 0xffff) << 16);
-						break;
-						case PM_CP_DATE_TYPE_CPU_POWER_RESET:
-							cp_pm_data = (diag.cpu1_power & 0xf) |
-								((diag.cpu2_power & 0xf) << 4) |
-								((diag.cpu_run_status & 0xffff) << 8);
-						break;
-						case PM_CP_DATE_TYPE_PSRAM_OWNERS:
-							cp_pm_data = diag.psram_owners;
-						break;
 						default:
 						break;
 					}
@@ -243,32 +216,12 @@ static bk_err_t low_pwr_core_message_handle(void)
 				case LOW_PWR_CORE_PSRAM_POWER:
 				{
 					if (msg.param3 != PM_PSRAM_PROTO_V1 ||
-						msg.param1 != PM_POWER_PSRAM_MODULE_NAME_OPENVELA)
+						msg.param1 != PM_POWER_PSRAM_MODULE_NAME_CPU1)
 						ret = BK_ERR_NOT_SUPPORT;
 					else
 						ret = bk_pm_module_vote_psram_ctrl(msg.param1,msg.param2);
 					bk_pm_cp0_response_cp1(PM_CTRL_PSRAM_POWER_CMD,
 						msg.param2, ret, msg.param3);
-				}
-				break;
-				case LOW_PWR_CORE_OPENVELA_READY:
-				{
-					bk_err_t response_ret;
-
-					if (msg.param3 != PM_OPENVELA_READY_PROTO_V1)
-						ret = BK_ERR_NOT_SUPPORT;
-					else
-						ret = bk_pm_openvela_ready_handle(msg.param1,
-							(int32_t)msg.param2);
-					response_ret = bk_pm_cp0_response_cp1(
-						PM_OPENVELA_READY_CMD, msg.param1, ret,
-						PM_OPENVELA_READY_PROTO_V1);
-					if (ret != BK_OK)
-						LOGE("OpenVela ready %d failed: %d\r\n",
-							msg.param1, ret);
-					if (response_ret != BK_OK)
-						LOGE("OpenVela ready response failed: %d\r\n",
-							response_ret);
 				}
 				break;
 				case LOW_PWR_CORE_POWER_CTRL:

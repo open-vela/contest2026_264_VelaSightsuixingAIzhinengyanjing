@@ -17,12 +17,10 @@ ENTRY(__start)
  */
 EXTERN(g_bk7258_boot_vectors)
 EXTERN(_vectors)
-EXTERN(g_bk7258_secondary_vectors)
 
 MEMORY
 {
   FLASH (rx)  : ORIGIN = 0x02150000, LENGTH = 0x00110000
-  SPINLOCK (rw) : ORIGIN = 0x28000000, LENGTH = 0x00010000
   RAM   (rwx) : ORIGIN = 0x28010000, LENGTH = 0x00054000
   SWAP  (rw)  : ORIGIN = 0x2809f800, LENGTH = 0x00000800
   PSRAM_SECTION (rw) : ORIGIN = 0x60a00000, LENGTH = 0x00600000
@@ -41,13 +39,6 @@ SECTIONS
   .gnu.sgstubs : ALIGN(32)
   {
     KEEP(*(.gnu.sgstubs*))
-  } > FLASH
-
-  .bk_secondary_vectors : ALIGN(512)
-  {
-    __secondary_vectors_start = .;
-    KEEP(*(.bk_secondary_vectors))
-    __secondary_vectors_end = .;
   } > FLASH
 
   .text : ALIGN(4)
@@ -110,20 +101,6 @@ SECTIONS
     *(.noinit .noinit.*)
   } > RAM
 
-  .bk_intstacks (NOLOAD) : ALIGN(32)
-  {
-    __intstacks_start = .;
-    KEEP(*(.bk_intstacks))
-    __intstacks_end = .;
-  } > RAM
-
-  .bk_bootstack (NOLOAD) : ALIGN(32)
-  {
-    __secondary_boot_stack_base = .;
-    KEEP(*(.bk_bootstack))
-    __secondary_boot_stack_top = .;
-  } > RAM
-
   .idle_stack (NOLOAD) : ALIGN(8)
   {
     __idle_stack_base = .;
@@ -137,13 +114,6 @@ SECTIONS
     KEEP(*(.swap .swap.*))
     __swap_end = ORIGIN(SWAP) + LENGTH(SWAP);
   } > SWAP
-
-  .bk_spinlock (NOLOAD) : ALIGN(32)
-  {
-    __spinlock_start = .;
-    KEEP(*(.bk_spinlock))
-    __spinlock_end = .;
-  } > SPINLOCK
 
   .psram.data : ALIGN(8)
   {
@@ -184,34 +154,10 @@ SECTIONS
   ASSERT((ADDR(.bk_boot_vectors) & 0x1ff) == 0,
          "AP boot vector is not 512-byte aligned")
   ASSERT((ADDR(.ram_vectors) & 0x1ff) == 0,
-          "AP runtime vector is not 512-byte aligned")
-  ASSERT((ADDR(.bk_secondary_vectors) & 0x1ff) == 0,
-         "CPU2 vector is not 512-byte aligned")
-  ASSERT(SIZEOF(.bk_secondary_vectors) == 8,
-         "CPU2 vector must contain exactly MSP and reset PC")
-  ASSERT((ADDR(.bk_intstacks) & 31) == 0,
-         "per-CPU interrupt stacks are not aligned")
-  ASSERT(SIZEOF(.bk_intstacks) == 4096,
-         "BK7258 requires two 2048-byte interrupt stacks")
-  ASSERT((ADDR(.bk_bootstack) & 31) == 0,
-         "CPU2 bootstrap stack is not aligned")
-  ASSERT(SIZEOF(.bk_bootstack) == 1024,
-         "CPU2 bootstrap stack size mismatch")
-  ASSERT((ADDR(.bk_spinlock) & 31) == 0,
-         "atomic gate is not aligned")
-  ASSERT(SIZEOF(.bk_spinlock) <= LENGTH(SPINLOCK),
-         "atomic gate exceeds AP_SPINLOCK")
-  ASSERT(ADDR(.bk_spinlock) >= ORIGIN(SPINLOCK) &&
-         ADDR(.bk_spinlock) + SIZEOF(.bk_spinlock) <=
-           ORIGIN(SPINLOCK) + LENGTH(SPINLOCK),
-         "atomic gate lies outside AP_SPINLOCK")
-  ASSERT(ADDR(.bk_spinlock) + SIZEOF(.bk_spinlock) <= 0x2800ffe0,
-         "atomic gate overlaps AP boot trace")
+         "AP runtime vector is not 512-byte aligned")
   ASSERT(SIZEOF(.bk_boot_vectors) >= 0x108,
          "AP boot vector does not contain BK legacy magic")
   ASSERT(_ebss <= __ap_ram_end, "AP bss overlaps CP RAM")
-  ASSERT(__secondary_boot_stack_top <= __idle_stack_base,
-         "CPU2 bootstrap stack overlaps primary idle stack")
   ASSERT(__heap_start < __heap_end, "AP heap is empty")
   ASSERT(__heap_end <= __ap_ram_end, "AP heap overlaps CP RAM")
   ASSERT(ORIGIN(SWAP) == 0x2809f800, "app_ab SWAP base mismatch")

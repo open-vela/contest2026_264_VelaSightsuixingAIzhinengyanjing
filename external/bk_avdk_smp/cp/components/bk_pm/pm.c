@@ -1380,13 +1380,6 @@ int32 bk_pm_module_power_state_get(pm_power_module_name_e module)
 
 static void pm_module_check_power_on(pm_power_module_name_e module)
 {
-#if CONFIG_OPENVELA_AP_480M
-	if (module == PM_POWER_MODULE_NAME_CPU1)
-	{
-		BK_LOGE(NULL, "CPU1 auto power-on is disabled for OpenVela lifecycle\r\n");
-		return;
-	}
-#endif
 	if (PM_POWER_MODULE_STATE_OFF == sys_drv_module_power_state_get(module))
 	{
 		sys_drv_module_power_ctrl(module, PM_POWER_MODULE_STATE_ON);
@@ -1415,13 +1408,6 @@ static void pm_module_check_power_on(pm_power_module_name_e module)
 
 static void pm_module_check_power_off(pm_power_module_name_e module)
 {
-#if CONFIG_OPENVELA_AP_480M
-	if (module == PM_POWER_MODULE_NAME_CPU1)
-	{
-		BK_LOGE(NULL, "CPU1 auto power-off is disabled for OpenVela lifecycle\r\n");
-		return;
-	}
-#endif
 	if (PM_POWER_MODULE_STATE_ON == sys_drv_module_power_state_get(module))
 	{
 		if (module == PM_POWER_MODULE_NAME_CPU1)

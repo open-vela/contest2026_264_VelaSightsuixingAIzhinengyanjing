@@ -508,7 +508,6 @@ static void cli_ate_main(uint32_t data)
 	}
 
 	bk_pm_cp1_auto_power_down_state_set(0x0);
-#if !CONFIG_OPENVELA_AP_480M
 	bk_pm_module_vote_power_ctrl(PM_POWER_MODULE_NAME_CPU1, PM_POWER_MODULE_STATE_ON);
 	extern void start_cpu1_core(void);
 	start_cpu1_core();
@@ -517,7 +516,6 @@ static void cli_ate_main(uint32_t data)
 	extern void start_cpu2_core(void);
 	start_cpu2_core();
 #endif //(CONFIG_CPU_CNT > 2)
-#endif
 
 	bk_uart_disable_sw_fifo(bk_get_printf_port());
 	bk_uart_register_rx_isr(bk_get_printf_port(), (uart_isr_t)ate_uart_rx_isr, NULL);

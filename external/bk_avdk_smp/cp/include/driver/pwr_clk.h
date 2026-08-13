@@ -40,8 +40,6 @@ extern "C" {
 #define PM_WAKEUP_CONFIG_CMD                 (0xf)
 
 #define PM_SLEEP_WAKEUP_NOTIFY_CMD           (0x10)
-#define PM_OPENVELA_READY_CMD                (0x11)
-#define PM_OPENVELA_READY_PROTO_V1           (0x1)
 #define PM_PSRAM_PROTO_V1                    (0x1)
 
 #define PM_AON_RTC_DEFAULT_TICK_COUNT        (32)//only for cp1 using aon rtc
@@ -151,9 +149,6 @@ typedef enum
 	PM_POWER_PSRAM_MODULE_NAME_MAX          ,// attention: MAX value can not exceed 31.
 }pm_power_psram_module_name_e;
 
-#define PM_POWER_PSRAM_MODULE_NAME_OPENVELA \
-	PM_POWER_PSRAM_MODULE_NAME_CPU1
-
 typedef enum
 {
 	PM_VDDDIG_MODULE_PSRAM       = 0,
@@ -205,30 +200,8 @@ typedef enum
 	PM_CP_DATE_TYPE_TIME_INTERVAL_FROM_STARTUP      = 0,
 	PM_CP_DATE_TYPE_DEEP_SLEEP_WAKEUP_SOURCE,
 	PM_CP_DATE_TYPE_EXIT_LOW_VOL_WAKEUP_SOURCE,
-	PM_CP_DATE_TYPE_CURRENT_FREQUENCY,
-	PM_CP_DATE_TYPE_CLOCK_DIVIDER,
-	PM_CP_DATE_TYPE_CPU_SPEED,
-	PM_CP_DATE_TYPE_VOLTAGE,
-	PM_CP_DATE_TYPE_CPU_POWER_RESET,
-	PM_CP_DATE_TYPE_PSRAM_OWNERS,
 	PM_CP_DATE_TYPE_MAX,                            // attention: MAX value can not exceed 31.
 }pm_ap_get_cp_data_type_e;
-
-typedef struct {
-	uint32_t cpu1_vote;
-	uint32_t max_vote;
-	uint32_t clk_div_reg0;
-	uint32_t cpu_speed[3];
-	uint32_t vddd;
-	uint32_t vdddig;
-	uint32_t cpu1_power;
-	uint32_t cpu2_power;
-	uint32_t cpu1_ctrl;
-	uint32_t cpu2_ctrl;
-	uint32_t cpu_run_status;
-	uint32_t psram_owners;
-	uint32_t boot_stage;
-} pm_openvela_diag_t;
 /**
  * @brief get mailbox busy state
  *
@@ -327,10 +300,6 @@ bk_err_t bk_pm_cp1_recovery_module_state_ctrl(pm_cp1_prepare_close_module_name_e
  */
 bk_err_t bk_pm_module_vote_vdddig_ctrl(pm_vdddig_module_e module,pm_vdddig_high_state_e state);
 uint32_t bk_pm_vdddig_required_get(pm_cpu_freq_e cpu_freq);
-bk_err_t bk_pm_openvela_diag_get(pm_openvela_diag_t *diag);
-bk_err_t bk_pm_openvela_diag_dump(void);
-void bk_pm_openvela_mailbox_diag_dump(void);
-bk_err_t bk_pm_openvela_ready_handle(uint32_t ready, int32_t error);
 /**
  * @brief boot cpu1 ok response
  *
@@ -679,7 +648,6 @@ bk_err_t bk_pm_module_vote_boot_cp1_ctrl(pm_boot_cp1_module_name_e module,pm_pow
  *
  */
 bk_err_t bk_pm_module_vote_boot_cp2_ctrl(pm_boot_cp2_module_name_e module,pm_power_module_state_e power_state);
-bk_err_t bk_pm_openvela_cpu2_power_hold(pm_power_module_state_e power_state);
 
 /**
  * @brief pm mailbox init

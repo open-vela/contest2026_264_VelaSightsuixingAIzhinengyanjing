@@ -8,3 +8,9 @@ config LVX_USE_DEMO_CONTEST2026_264_CTRLC_TEST
 	default n
 	---help---
 		Enable the BK7258 UART controlling-terminal SIGINT test command.
+
+config LVX_USE_DEMO_CONTEST2026_264_PERIPH_SELFTEST
+	bool "BK7258 peripheral self-test"
+	default n
+	---help---
+		Enable the BK7258 peripheral self-test command.

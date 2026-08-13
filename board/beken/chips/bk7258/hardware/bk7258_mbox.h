@@ -16,7 +16,6 @@
 #define BK7258_MBOX_IRQ             79
 #define BK7258_MBOX_CMD_FIFO        1u
 #define BK7258_MBOX_ACK_FIFO        0u
-#define BK7258_MBOX_RAW_KICK        0x534d5001u
 
 #define BK7258_MBOX_REG(n)          (BK7258_MBOX0_BASE + ((n) * 4u))
 #define BK7258_MBOX_CTRL            BK7258_MBOX_REG(0x02)
@@ -30,16 +29,6 @@
 #define BK7258_MBOX_CH1_RDATA0      BK7258_MBOX_REG(0x26)
 #define BK7258_MBOX_CH1_RDATA1      BK7258_MBOX_REG(0x27)
 #define BK7258_MBOX_CH1_STATUS      BK7258_MBOX_REG(0x28)
-#define BK7258_MBOX_CH2_CFG         BK7258_MBOX_REG(0x30)
-#define BK7258_MBOX_CH2_FIFO_CFG    BK7258_MBOX_REG(0x31)
-#define BK7258_MBOX_CH2_TDATA0      BK7258_MBOX_REG(0x32)
-#define BK7258_MBOX_CH2_TDATA1      BK7258_MBOX_REG(0x33)
-#define BK7258_MBOX_CH2_TID         BK7258_MBOX_REG(0x34)
-#define BK7258_MBOX_CH2_SID         BK7258_MBOX_REG(0x35)
-#define BK7258_MBOX_CH2_RDATA0      BK7258_MBOX_REG(0x36)
-#define BK7258_MBOX_CH2_RDATA1      BK7258_MBOX_REG(0x37)
-#define BK7258_MBOX_CH2_STATUS      BK7258_MBOX_REG(0x38)
-
 #define BK7258_MBOX_CFG_INT_EN         (1u << 8)
 #define BK7258_MBOX_CFG_WRERR_EN       (1u << 9)
 #define BK7258_MBOX_CFG_RDERR_EN       (1u << 10)
@@ -247,11 +236,6 @@ typedef void (*bk7258_mb_uart_callback_t)(void *arg);
 
 int bk7258_mbox_init(void);
 int bk7258_mbox_send(uint8_t destination, const uint32_t data[2]);
-bool bk7258_mbox_smp_ready(void);
-#ifdef CONFIG_SMP
-int bk7258_mbox_secondary_init(void);
-void bk7258_smp_ipi_receive(int irq, void *context, uint32_t command);
-#endif
 uint32_t bk7258_mbox_rx_status(void);
 void bk7258_mbox_set_callback(bk7258_mbox_callback_t callback);
 void bk7258_mbox_get_stats(struct bk7258_mbox_stats *stats);
@@ -260,8 +244,6 @@ void bk7258_mbox_discard_deferred(void);
 
 int bk7258_mailbox_init(void);
 int bk7258_mailbox_start(void);
-int bk7258_mailbox_workers_start(void);
-int bk7258_mailbox_workers_activate(void);
 int bk7258_mailbox_send_wire(uint8_t logical_channel,
                              const struct bk7258_mb_wire_message *message,
                              bk7258_mb_tx_complete_t callback, void *arg);
@@ -292,8 +274,6 @@ int bk7258_ipc_heartbeat_start(void);
 void bk7258_ipc_heartbeat_poll(void);
 
 int bk7258_mb_uart_init(void);
-int bk7258_mb_uart_worker_start(void);
-int bk7258_mb_uart_worker_activate(void);
 void bk7258_mb_uart_start(void);
 void bk7258_mb_uart_request_state(void);
 ssize_t bk7258_mbox_uart_write(const uint8_t *data, size_t length);

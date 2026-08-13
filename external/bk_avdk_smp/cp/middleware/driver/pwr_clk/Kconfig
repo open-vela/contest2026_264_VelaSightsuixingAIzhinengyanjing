@@ -11,13 +11,12 @@ menu "PWR_CLK"
 	config CPU_DEFAULT_FREQ_60M
 		bool "set cpu default frequency 60M"
 		default n
-	config OPENVELA_AP_480M
-		bool "OpenVela AP fixed 480M lifecycle"
-		depends on SOC_BK7258 && CPU_CNT > 2
+	config OPENVELA_AP_CPU1_480M
+		bool "Run the OpenVela CPU1 application at 480 MHz"
 		default n
 		help
-			Keep this disabled for the vendor FreeRTOS AP. When enabled, CP
-			owns the OpenVela CPU1 480 MHz vote and CPU2 power-only hold.
+			Hold a 480 MHz CPU1 frequency vote while the single-core
+			OpenVela AP is running. This option does not start CPU2.
 	config RESERVE_1K_SRAM_UNINITIAL
 		bool "reserve 1k sram uninitialized"
 		default n

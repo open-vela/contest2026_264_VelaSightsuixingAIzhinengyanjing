@@ -14,7 +14,6 @@
 #include <nuttx/clock.h>
 #include <nuttx/kthread.h>
 #include <nuttx/mutex.h>
-#include <nuttx/sched.h>
 #include <nuttx/signal.h>
 
 #include "hardware/bk7258_mbox.h"
@@ -40,19 +39,6 @@ static uint32_t g_heartbeat_submissions;
 static uint32_t g_heartbeat_reported;
 static bool g_ipc_started;
 
-static int bind_worker_to_primary(void)
-{
-#ifdef CONFIG_SMP
-  cpu_set_t cpuset;
-
-  CPU_ZERO(&cpuset);
-  CPU_SET(0, &cpuset);
-  return sched_setaffinity(0, sizeof(cpuset), &cpuset);
-#else
-  return OK;
-#endif
-}
-
 static int ipc_ack_result(const struct bk7258_mb_wire_message *ack,
                           int result)
 {
@@ -66,7 +52,7 @@ static int ipc_ack_result(const struct bk7258_mb_wire_message *ack,
 }
 
 static void ipc_tx_complete(const struct bk7258_mb_wire_message *ack,
-                              int result, void *arg)
+                            int result, void *arg)
 {
   g_ipc_ack_result = ipc_ack_result(ack, result);
   if ((uintptr_t)arg == IPC_CPU1_POWER_UP_INDICATION &&
@@ -128,16 +114,8 @@ static int ipc_send(uint8_t command, uint32_t parameter)
 
 static int ipc_heartbeat_worker(int argc, char **argv)
 {
-  int ret;
-
   (void)argc;
   (void)argv;
-
-  ret = bind_worker_to_primary();
-  if (ret < 0)
-    {
-      return -EXDEV;
-    }
 
   for (;;)
     {
@@ -237,16 +215,8 @@ int bk7258_ipc_heartbeat_start(void)
   g_heartbeat_failures = 0;
   g_heartbeat_submissions = 0;
   g_heartbeat_reported = 0;
-  ret = bind_worker_to_primary();
-  if (ret < 0)
-    {
-      g_ipc_start_result = -EXDEV;
-    }
-  else
-    {
-      ret = ipc_send(IPC_CPU1_POWER_UP_INDICATION, 0);
-      g_ipc_start_result = ret < 0 ? ret : OK;
-    }
+  ret = ipc_send(IPC_CPU1_POWER_UP_INDICATION, 0);
+  g_ipc_start_result = ret < 0 ? ret : OK;
 
   if (g_ipc_start_result == OK)
     {

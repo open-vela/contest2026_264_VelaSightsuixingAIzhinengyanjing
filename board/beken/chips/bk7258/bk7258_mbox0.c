@@ -15,7 +15,6 @@
 #include "arm_internal.h"
 #include "hardware/bk7258_mbox.h"
 #include "hardware/bk7258_sysctrl.h"
-#include "bk7258_boottrace.h"
 #include "irq.h"
 
 #define MBOX_RX_DESC_COUNT      (2u * 3u + 1u)
@@ -33,51 +32,40 @@ static struct mbox_rx_descriptor g_rx_desc[MBOX_RX_DESC_COUNT];
 static uint32_t g_rx_order;
 static uint32_t g_processing_order;
 static bool g_mbox_ready;
-static bool g_mbox_smp_ready;
 static struct bk7258_mbox_stats g_stats;
-
-static void mbox_trace_errors(void)
-{
-  bk7258_boottrace_detail(4,
-    (g_stats.bad_source & 0xffu) |
-    ((g_stats.bad_length & 0xffu) << 8) |
-    ((g_stats.bad_address & 0xffu) << 16) |
-    ((g_stats.descriptor_full & 0xffu) << 24));
-}
 
 _Static_assert(MBOX_RX_DESC_COUNT > 2u * 3u,
                "RX descriptors must hold a deferred command and two FIFOs");
 
 uint32_t bk7258_mbox_rx_status(void)
 {
-  return getreg32(up_cpu_index() == 0 ? BK7258_MBOX_CH1_STATUS :
-                                       BK7258_MBOX_CH2_STATUS);
+  return getreg32(BK7258_MBOX_CH1_STATUS);
 }
 
-static void mbox_clear_errors(int cpu)
+static void mbox_clear_errors(void)
 {
-  uintptr_t cfg = cpu == 0 ? BK7258_MBOX_CH1_CFG : BK7258_MBOX_CH2_CFG;
-  uint32_t config = getreg32(cfg);
+  uint32_t config = getreg32(BK7258_MBOX_CH1_CFG);
   uint32_t errors = config & BK7258_MBOX_CFG_ERROR_STATUS;
 
-  if (cpu == 0 && (errors & BK7258_MBOX_CFG_WRERR_STATUS) != 0)
+  if ((errors & BK7258_MBOX_CFG_WRERR_STATUS) != 0)
     {
       g_stats.write_error++;
     }
 
-  if (cpu == 0 && (errors & BK7258_MBOX_CFG_RDERR_STATUS) != 0)
+  if ((errors & BK7258_MBOX_CFG_RDERR_STATUS) != 0)
     {
       g_stats.read_error++;
     }
 
-  if (cpu == 0 && (errors & BK7258_MBOX_CFG_WRFULL_STATUS) != 0)
+  if ((errors & BK7258_MBOX_CFG_WRFULL_STATUS) != 0)
     {
       g_stats.write_full++;
     }
 
   if (errors != 0)
     {
-      putreg32((config & BK7258_MBOX_CFG_RW_MASK) | errors, cfg);
+      putreg32((config & BK7258_MBOX_CFG_RW_MASK) | errors,
+               BK7258_MBOX_CH1_CFG);
     }
 }
 
@@ -87,14 +75,12 @@ static bool mbox_valid_envelope(uint8_t source, uint32_t address,
   if (source != 0)
     {
       g_stats.bad_source++;
-      mbox_trace_errors();
       return false;
     }
 
   if (length != BK7258_MB_MESSAGE_SIZE)
     {
       g_stats.bad_length++;
-      mbox_trace_errors();
       return false;
     }
 
@@ -102,7 +88,6 @@ static bool mbox_valid_envelope(uint8_t source, uint32_t address,
       address > BK7258_CP_RAM_END - BK7258_MB_MESSAGE_SIZE)
     {
       g_stats.bad_address++;
-      mbox_trace_errors();
       return false;
     }
 
@@ -113,27 +98,18 @@ int bk7258_mbox_send(uint8_t destination, const uint32_t data[2])
 {
   irqstate_t flags;
   uintptr_t status;
-  int cpu = up_cpu_index();
 
-  if (!g_mbox_ready || destination > 2 || data == NULL)
+  if (!g_mbox_ready || destination > 1 || data == NULL)
     {
       return -EINVAL;
     }
-
-#ifdef CONFIG_SMP
-  if (cpu == 1 && (destination != 1 || data[1] != 0))
-    {
-      return -EPERM;
-    }
-#endif
 
   /* CPU1 transmits through channel 1.  Full is reported by the target's
    * receive FIFO status register.
    */
 
   status = destination == 0 ? BK7258_MBOX_CH0_STATUS :
-            destination == 1 ? BK7258_MBOX_CH1_STATUS :
-                               BK7258_MBOX_CH2_STATUS;
+                              BK7258_MBOX_CH1_STATUS;
   flags = up_irq_save();
   if ((getreg32(status) & 1u) != 0)
     {
@@ -142,15 +118,12 @@ int bk7258_mbox_send(uint8_t destination, const uint32_t data[2])
     }
 
   /* TDATA0/TDATA1 are staging registers and TID commits the descriptor.
-   * Keep raw SMP kicks and transport sends from interleaving these writes.
+   * Keep concurrent transport sends from interleaving these writes.
    */
 
-  putreg32(data[0], cpu == 0 ? BK7258_MBOX_CH1_TDATA0 :
-                               BK7258_MBOX_CH2_TDATA0);
-  putreg32(data[1], cpu == 0 ? BK7258_MBOX_CH1_TDATA1 :
-                               BK7258_MBOX_CH2_TDATA1);
-  putreg32(destination, cpu == 0 ? BK7258_MBOX_CH1_TID :
-                                   BK7258_MBOX_CH2_TID);
+  putreg32(data[0], BK7258_MBOX_CH1_TDATA0);
+  putreg32(data[1], BK7258_MBOX_CH1_TDATA1);
+  putreg32(destination, BK7258_MBOX_CH1_TID);
   up_irq_restore(flags);
   return OK;
 }
@@ -243,24 +216,16 @@ static int bk7258_mbox_irq(int irq, void *context, void *arg)
   uintptr_t rdata0;
   uintptr_t rdata1;
   uintptr_t sidreg;
-  int cpu = up_cpu_index();
   unsigned int budget = MBOX_IRQ_DRAIN_BUDGET;
 
   (void)irq;
   (void)context;
   (void)arg;
 
-  mbox_clear_errors(cpu);
-  if (cpu == 1 && bk7258_boottrace_secondary_stage() >=
-                  BK7258_BOOT_SECONDARY_ACK &&
-                  bk7258_boottrace_secondary_stage() <
-                  BK7258_BOOT_SECONDARY_MBOX_ENTER)
-    {
-      bk7258_boottrace_secondary(BK7258_BOOT_SECONDARY_MBOX_ENTER);
-    }
-  sidreg = cpu == 0 ? BK7258_MBOX_CH1_SID : BK7258_MBOX_CH2_SID;
-  rdata0 = cpu == 0 ? BK7258_MBOX_CH1_RDATA0 : BK7258_MBOX_CH2_RDATA0;
-  rdata1 = cpu == 0 ? BK7258_MBOX_CH1_RDATA1 : BK7258_MBOX_CH2_RDATA1;
+  mbox_clear_errors();
+  sidreg = BK7258_MBOX_CH1_SID;
+  rdata0 = BK7258_MBOX_CH1_RDATA0;
+  rdata1 = BK7258_MBOX_CH1_RDATA1;
 
   while ((bk7258_mbox_rx_status() & 2u) == 0 && budget-- != 0)
     {
@@ -269,52 +234,18 @@ static int bk7258_mbox_irq(int irq, void *context, void *arg)
       uint32_t length;
       uint8_t source;
 
-      if (cpu == 0)
-        {
-          mbox_process_desc();
-        }
+      mbox_process_desc();
 
-      desc = cpu == 0 ? mbox_alloc_desc() : NULL;
-      if (cpu == 0 && desc == NULL)
+      desc = mbox_alloc_desc();
+      if (desc == NULL)
         {
           g_stats.descriptor_full++;
-          mbox_trace_errors();
           break;
         }
 
       source = getreg32(sidreg) & 0x0fu;
       address = getreg32(rdata0);
       length = getreg32(rdata1);
-#ifdef CONFIG_SMP
-      if (length == 0)
-        {
-          if (source == (uint8_t)(2 - cpu))
-            {
-              if (cpu == 1 && address == BK7258_MBOX_RAW_KICK)
-                {
-                  bk7258_boottrace_secondary(BK7258_BOOT_SECONDARY_MBOX_RAW);
-                }
-
-              bk7258_smp_ipi_receive(irq, context, address);
-            }
-          else
-            {
-              if (cpu == 0)
-                {
-                  g_stats.bad_source++;
-                  mbox_trace_errors();
-                }
-            }
-
-          continue;
-        }
-#endif
-
-      if (cpu != 0)
-        {
-          continue;
-        }
-
       if (!mbox_valid_envelope(source, address, length))
         {
           continue;
@@ -326,22 +257,10 @@ static int bk7258_mbox_irq(int irq, void *context, void *arg)
       desc->order = ++g_rx_order;
       desc->used = true;
       g_stats.rx_messages++;
-      bk7258_boottrace_detail(0, desc->message.header);
-      bk7258_boottrace_detail(1, address);
-      bk7258_boottrace_detail(2, g_stats.rx_messages);
       mbox_process_desc();
     }
 
-  if (cpu == 0)
-    {
-      mbox_process_desc();
-    }
-
-  if (cpu == 1 && bk7258_boottrace_secondary_stage() ==
-                  BK7258_BOOT_SECONDARY_MBOX_RAW)
-    {
-      bk7258_boottrace_secondary(BK7258_BOOT_SECONDARY_MBOX_EXIT);
-    }
+  mbox_process_desc();
 
   return OK;
 }
@@ -411,14 +330,8 @@ int bk7258_mbox_init(void)
             BK7258_MBOX_CFG_RDERR_EN | BK7258_MBOX_CFG_WRFULL_EN,
             BK7258_MBOX_CH1_CFG);
   putreg32(1u | (3u << 1), BK7258_MBOX_CH1_FIFO_CFG);
-#ifdef CONFIG_SMP
-  putreg32(5u | BK7258_MBOX_CFG_INT_EN | BK7258_MBOX_CFG_WRERR_EN |
-            BK7258_MBOX_CFG_RDERR_EN | BK7258_MBOX_CFG_WRFULL_EN,
-            BK7258_MBOX_CH2_CFG);
-  putreg32(1u | (3u << 1), BK7258_MBOX_CH2_FIFO_CFG);
-#endif
   modifyreg32(BK7258_MBOX_CTRL, 0, 1u << 2);
-  mbox_clear_errors(0);
+  mbox_clear_errors();
 
   ret = irq_attach(BK7258_IRQ_MAILBOX, bk7258_mbox_irq, NULL);
   if (ret < 0)
@@ -427,34 +340,7 @@ int bk7258_mbox_init(void)
     }
 
   g_mbox_ready = true;
-#ifdef CONFIG_SMP
-  g_mbox_smp_ready = true;
-#endif
   modifyreg32(BK7258_CPU1_IRQ_EN1, 0, 1u << 31);
   up_enable_irq(BK7258_IRQ_MAILBOX);
   return OK;
 }
-
-bool bk7258_mbox_smp_ready(void)
-{
-#ifdef CONFIG_SMP
-  return g_mbox_ready && g_mbox_smp_ready;
-#else
-  return false;
-#endif
-}
-
-#ifdef CONFIG_SMP
-int bk7258_mbox_secondary_init(void)
-{
-  if (!g_mbox_ready || !g_mbox_smp_ready || up_cpu_index() != 1)
-    {
-      return -EAGAIN;
-    }
-
-  mbox_clear_errors(1);
-  modifyreg32(BK7258_CPU2_IRQ_EN1, 0, 1u << 31);
-  up_enable_irq(BK7258_IRQ_MAILBOX);
-  return OK;
-}
-#endif

@@ -3,8 +3,6 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
-#include <pthread.h>
-#include <sched.h>
 #include <stddef.h>
 #include <stdio.h>
 
@@ -17,8 +15,6 @@
 #include "bk7258_psram.h"
 #include "bk7258_ramdisk.h"
 #include "bk7258_gc9d01_fb.h"
-#include "bk7258_boottrace.h"
-#include "bk7258_smp.h"
 #include "hardware/bk7258_mbox.h"
 #include "bk7258_wifi.h"
 
@@ -31,8 +27,6 @@
 #endif
 
 #define BK7258_LINK_WAIT_MS 8000u
-#define BK7258_BRINGUP_PRIORITY 100
-#define BK7258_BRINGUP_STACKSIZE 4096
 
 int bk7258_pwc_start(void);
 int bk7258_motor_setup(void);
@@ -45,7 +39,7 @@ int bk7258_bringup(void)
   uint32_t button_count;
   int ret;
 
-  bk7258_boottrace_primary(BK7258_BOOT_BRINGUP_ENTER);
+  button_count = board_button_initialize();
 #ifdef CONFIG_FS_PROCFS
   /* Mount procfs first so that ps, free and the other informational NSH
    * commands work even if a later bring-up step returns early. A mount
@@ -60,57 +54,12 @@ int bk7258_bringup(void)
     }
 #endif
 
-  button_count = board_button_initialize();
-
   ret = bk7258_motor_setup();
   if (ret < 0)
     {
       return ret;
     }
 
-  ret = bk7258_mailbox_workers_start();
-  if (ret < 0)
-    {
-      printf("mailbox worker start failed, error=%d\n", ret);
-      return ret;
-    }
-
-  bk7258_boottrace_primary(BK7258_BOOT_BRINGUP_WORKERS);
-
-  ret = bk7258_mb_uart_worker_start();
-  if (ret < 0)
-    {
-      printf("mailbox UART0 worker start failed, error=%d\n", ret);
-      return ret;
-    }
-
-  bk7258_boottrace_primary(BK7258_BOOT_BRINGUP_UART_WORKER);
-
-  /* Create every CPU0-only transport worker before enabling SysTick. */
-
-  bk7258_boottrace_primary(BK7258_BOOT_BRINGUP_TIMER_START);
-  ret = bk7258_timer_start();
-  if (ret < 0)
-    {
-      printf("system tick start failed, error=%d\n", ret);
-      return ret;
-    }
-
-  bk7258_boottrace_primary(BK7258_BOOT_BRINGUP_TIMER_RETURN);
-
-  /* Workers were created at their final priorities.  Avoid reprioritizing
-   * live SMP tasks during boot; the workers preempt this priority-100 thread
-   * only long enough to drain transport state and then block. */
-
-  bk7258_boottrace_primary(BK7258_BOOT_BRINGUP_ACTIVATE);
-
-  bk7258_boottrace_primary(BK7258_BOOT_WORKERS_READY);
-
-  bk7258_mb_uart_start();
-
-  bk7258_boottrace_primary(BK7258_BOOT_BRINGUP_UART_START);
-
-  bk7258_boottrace_primary(BK7258_BOOT_BRINGUP_LINK_WAIT);
   ret = bk7258_mailbox_wait_link_ready(BK7258_LINK_WAIT_MS);
   if (ret < 0)
     {
@@ -120,10 +69,7 @@ int bk7258_bringup(void)
       return ret;
     }
 
-  bk7258_boottrace_primary(BK7258_BOOT_BRINGUP_LINK_READY);
-
   printf("mailbox UART0 link ready\n");
-  bk7258_boottrace_primary(BK7258_BOOT_LINK_READY);
 
   ret = bk7258_ipc_heartbeat_start();
   if (ret < 0)
@@ -182,15 +128,14 @@ int bk7258_bringup(void)
   return 0;
 }
 
-static void *bk7258_bringup_worker(void *arg)
+void board_late_initialize(void)
 {
   int ret = bk7258_bringup();
 
-  (void)arg;
   if (ret < 0)
     {
       printf("board bring-up stopped, error=%d\n", ret);
-      return NULL;
+      return;
     }
 
   printf("board bring-up initialization completed\n");
@@ -260,33 +205,4 @@ static void *bk7258_bringup_worker(void *arg)
 
   (void)bk7258_jpeg_enc_initialize();
 #endif
-  return NULL;
-}
-
-void board_late_initialize(void)
-{
-  struct sched_param param;
-  pthread_attr_t attr;
-  pthread_t thread;
-  cpu_set_t cpuset;
-  int ret;
-
-  pthread_attr_init(&attr);
-  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-  pthread_attr_setstacksize(&attr, BK7258_BRINGUP_STACKSIZE);
-  pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
-  param.sched_priority = BK7258_BRINGUP_PRIORITY;
-  pthread_attr_setschedparam(&attr, &param);
-#ifdef CONFIG_SMP
-  CPU_ZERO(&cpuset);
-  CPU_SET(0, &cpuset);
-  pthread_attr_setaffinity_np(&attr, sizeof(cpuset), &cpuset);
-#endif
-
-  ret = pthread_create(&thread, &attr, bk7258_bringup_worker, NULL);
-  pthread_attr_destroy(&attr);
-  if (ret != 0)
-    {
-      printf("board bring-up worker create failed, error=%d\n", ret);
-    }
 }

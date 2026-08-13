@@ -408,12 +408,6 @@ static bk_err_t mb_phy_chnl_tx_cmd(u8 log_chnl)
 	return BK_OK;
 }
 
-void mb_chnl_start_service(void)
-{
-	/* Mailbox RX and ACK dispatch run in the hardware ISR path.  Retain this
-	 * legacy entry point for callers, but do not start a second poll model. */
-}
-
 static void mb_phy_chnl_rx_ack_isr(mb_phy_chnl_ack_t *ack_ptr)
 {
 	u8		log_chnl;
@@ -1258,12 +1252,6 @@ void mb_chnl_recovered(u8 peer_cpu)
 {
 	if (peer_cpu < PHY_CHNL_NUM && peer_cpu != SELF_CPU)
 		phy_chnl_x_cb[peer_cpu].recovering = 0;
-}
-
-void mb_chnl_quiesce(u8 peer_cpu)
-{
-	if (peer_cpu < PHY_CHNL_NUM && peer_cpu != SELF_CPU)
-		phy_chnl_x_cb[peer_cpu].recovering = 1;
 }
 
 void mb_debug_status() {

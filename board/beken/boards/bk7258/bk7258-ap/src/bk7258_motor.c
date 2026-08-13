@@ -15,7 +15,6 @@
 #include <nuttx/board.h>
 #include <nuttx/clock.h>
 #include <nuttx/kthread.h>
-#include <nuttx/sched.h>
 #include <nuttx/semaphore.h>
 #include <nuttx/signal.h>
 #include <syslog.h>
@@ -40,19 +39,6 @@ int bk7258_mailbox_wait_pwc(unsigned int timeout_ms);
 static sem_t g_motor_ready_sem;
 static volatile int g_motor_worker_result;
 
-static int bind_worker_to_primary(void)
-{
-#ifdef CONFIG_SMP
-  cpu_set_t cpuset;
-
-  CPU_ZERO(&cpuset);
-  CPU_SET(0, &cpuset);
-  return sched_setaffinity(0, sizeof(cpuset), &cpuset);
-#else
-  return OK;
-#endif
-}
-
 static int bk7258_motor_button_worker(int argc, char **argv)
 {
   struct pwm_info_s info =
@@ -64,18 +50,11 @@ static int bk7258_motor_button_worker(int argc, char **argv)
   bool pressed = false;
   unsigned int samples = 0;
   int ret;
-  int fd;
+  int fd = -1;
   clock_t request_start;
 
   (void)argc;
   (void)argv;
-  fd = bind_worker_to_primary();
-  if (fd < 0)
-    {
-      ret = -EXDEV;
-      goto ready;
-    }
-
   request_start = clock_systime_ticks();
   ret = bk7258_mailbox_send_pwc(BK7258_PM_CLK_CTRL_CMD,
                                 BK7258_PM_CLK_ID_PWM_1,

@@ -18,7 +18,6 @@
 #include <nuttx/kmalloc.h>
 #include <nuttx/mutex.h>
 #include <nuttx/net/netdev_lowerhalf.h>
-#include <nuttx/sched.h>
 #include <nuttx/semaphore.h>
 #include <nuttx/spinlock.h>
 #include <nuttx/wireless/wireless.h>
@@ -146,19 +145,6 @@ struct wifi_driver
 
 static struct wifi_driver g_wifi;
 static volatile int g_worker_result;
-
-static int bind_worker_to_primary(void)
-{
-#ifdef CONFIG_SMP
-  cpu_set_t cpuset;
-
-  CPU_ZERO(&cpuset);
-  CPU_SET(0, &cpuset);
-  return sched_setaffinity(0, sizeof(cpuset), &cpuset);
-#else
-  return OK;
-#endif
-}
 
 _Static_assert(sizeof(g_wifi.command_data) >=
                sizeof(struct bk7258_wifi_scan_page_response),
@@ -1392,17 +1378,10 @@ static void wifi_link_changed(enum bk7258_mb_link_state state, void *arg)
 
 static int wifi_worker(int argc, char **argv)
 {
-  int ret;
-
   (void)argc;
   (void)argv;
-  ret = bind_worker_to_primary();
-  g_worker_result = ret < 0 ? -EXDEV : OK;
+  g_worker_result = OK;
   nxsem_post(&g_wifi.ready_sem);
-  if (ret < 0)
-    {
-      return -EXDEV;
-    }
 
   for (;;)
     {

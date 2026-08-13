@@ -15,6 +15,7 @@ CHIP_CSRCS += bk7258_syslog.c
 CHIP_CSRCS += bk7258_serial.c
 CHIP_CSRCS += bk7258_mbox0.c
 CHIP_CSRCS += bk7258_mailbox_channel.c
+CHIP_CSRCS += bk7258_ipc_heartbeat.c
 CHIP_CSRCS += bk7258_wifi.c
 CHIP_CSRCS += bk7258_mb_uart.c
 CHIP_CSRCS += bk7258_pm_pwc.c
@@ -29,14 +30,6 @@ CHIP_CSRCS += bk7258_camera_imgdata.c
 CHIP_CSRCS += bk7258_aud.c
 CHIP_CSRCS += bk7258_cpuindex.c
 CHIP_CSRCS += bk7258_idle.c
-
-ifeq ($(CONFIG_SMP),y)
-CHIP_CSRCS += bk7258_cpustart.c
-CHIP_CSRCS += bk7258_cpuidlestack.c
-CHIP_CSRCS += bk7258_smpcall.c
-CHIP_CSRCS += bk7258_hwspinlock.c
-CHIP_CSRCS += bk7258_atomic.c
-endif
 
 ARCHCPUFLAGS += -mcpu=cortex-m33+nodsp -mthumb
 ARCHCPUFLAGS += -mfpu=fpv5-sp-d16 -mfloat-abi=hard -mcmse

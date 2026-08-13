@@ -28,15 +28,6 @@ set(SRCS
     bk7258_cpuindex.c
     bk7258_idle.c)
 
-if(CONFIG_SMP)
-  list(APPEND SRCS
-       bk7258_cpustart.c
-       bk7258_cpuidlestack.c
-       bk7258_smpcall.c
-       bk7258_hwspinlock.c
-       bk7258_atomic.c)
-endif()
-
 add_library(bk7258_chip OBJECT ${SRCS})
 add_dependencies(bk7258_chip nuttx_context)
 nuttx_add_library_internal(bk7258_chip)

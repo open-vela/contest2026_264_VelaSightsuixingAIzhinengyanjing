@@ -19,8 +19,6 @@
 #include "hardware/bk7258_memorymap.h"
 #include "hardware/bk7258_mbox.h"
 #include "hardware/bk7258_psram.h"
-#include "bk7258_boottrace.h"
-#include "bk7258_smp.h"
 
 #if defined(CONFIG_BK7258_PSRAM) && \
     CONFIG_BK7258_PSRAM_SIZE != BK7258_PSRAM_SIZE
@@ -57,12 +55,6 @@ static const struct mpu_region_s g_bk7258_mpu_regions[] =
     MPU_RLAR_NONCACHEABLE
   },
   {
-    BK7258_AP_SPINLOCK_BASE,
-    BK7258_AP_SPINLOCK_SIZE,
-    MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_INNER,
-    MPU_RLAR_NONCACHEABLE
-  },
-  {
     BK7258_CP_RAM_START,
     BK7258_CP_RAM_END - BK7258_CP_RAM_START,
     /* Controller-interface command/event pools and direct-push pbufs carry
@@ -73,8 +65,8 @@ static const struct mpu_region_s g_bk7258_mpu_regions[] =
     MPU_RLAR_NONCACHEABLE
   },
   {
-    BK7258_MB_SHARED_TX_START,
-    BK7258_MB_SHARED_TX_SIZE,
+    BK7258_IPC_TX_ADDRESS,
+    BK7258_IPC_TX_SIZE,
     MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_INNER,
     MPU_RLAR_NONCACHEABLE
   },
@@ -82,6 +74,12 @@ static const struct mpu_region_s g_bk7258_mpu_regions[] =
     BK7258_MB_UART_RX_ADDRESS,
     BK7258_MB_UART_CHUNK_SIZE,
     MPU_RBAR_XN | MPU_RBAR_AP_RORO | MPU_RBAR_SH_INNER,
+    MPU_RLAR_NONCACHEABLE
+  },
+  {
+    BK7258_MB_UART_TX_ADDRESS,
+    BK7258_MB_UART_CHUNK_SIZE,
+    MPU_RBAR_XN | MPU_RBAR_AP_RWRW | MPU_RBAR_SH_INNER,
     MPU_RLAR_NONCACHEABLE
   },
 #ifdef CONFIG_BK7258_PSRAM
@@ -110,10 +108,10 @@ bk7258_cpu_private_initialize(bool primary)
   const size_t region_count = sizeof(g_bk7258_mpu_regions) /
                               sizeof(g_bk7258_mpu_regions[0]);
 
-  if (!primary)
-    {
-      arm_fpuconfig();
-    }
+  modifyreg32(NVIC_CPACR, 0,
+              NVIC_CPACR_CP_FULL(10) | NVIC_CPACR_CP_FULL(11));
+  UP_DSB();
+  UP_ISB();
 
   putreg32(0, BK7258_SAU_BASE + 0x08);
   putreg32(0x00000000u, BK7258_SAU_BASE + 0x0c);
@@ -159,8 +157,6 @@ bk7258_start(void)
   const uint8_t *src;
   uint8_t *dest;
 
-  bk7258_boottrace_primary(BK7258_BOOT_PRIMARY_C);
-
   /* Configure the FPU before code compiled for the hard-float ABI can use
    * it.  arm_fpuconfig() does not depend on BSS-backed synchronization.
    */
@@ -168,21 +164,15 @@ bk7258_start(void)
   arm_fpuconfig();
   UP_DSB();
   UP_ISB();
-  bk7258_boottrace_primary(BK7258_BOOT_PRIMARY_CPACR);
-
   for (src = _eronly, dest = _sdata; dest < _edata; )
     {
       *dest++ = *src++;
     }
 
-  bk7258_boottrace_primary(BK7258_BOOT_PRIMARY_DATA);
-
   for (dest = _sbss; dest < _ebss; )
     {
       *dest++ = 0;
     }
-
-  bk7258_boottrace_primary(BK7258_BOOT_PRIMARY_BSS);
 
   for (src = __ram_vectors_load, dest = __ram_vectors_start;
        dest < __ram_vectors_end; )
@@ -190,14 +180,7 @@ bk7258_start(void)
       *dest++ = *src++;
     }
 
-  bk7258_boottrace_primary(BK7258_BOOT_PRIMARY_VECTORS);
-
-#ifdef CONFIG_SMP
-  bk7258_hwspinlock_initialize();
-#endif
-  bk7258_boottrace_primary(BK7258_BOOT_PRIMARY_SPINLOCK);
   bk7258_cpu_private_initialize(true);
-  bk7258_boottrace_primary(BK7258_BOOT_PRIMARY_PRIVATE);
   arm_initialize_stack();
 
   /* Install the buffered AP log channel before normal NuttX startup. */
@@ -207,7 +190,6 @@ bk7258_start(void)
   arm_earlyserialinit();
 #endif
 
-  bk7258_boottrace_primary(BK7258_BOOT_PRIMARY_NXSTART);
   nx_start();
   for (; ; )
     {
@@ -222,19 +204,6 @@ void __attribute__((naked, noreturn, section(".start_text"))) __start(void)
       "movs r0, #0\n"
       "ldr r1, =0x20000000\n"
       "str r0, [r1]\n"
-      "ldr r1, =0x2800ffe0\n"
-      "ldr r2, =0x41505452\n"
-      "str r2, [r1]\n"
-      "movs r2, #1\n"
-      "str r2, [r1, #4]\n"
-      "movs r2, #0\n"
-      "str r2, [r1, #8]\n"
-      "str r2, [r1, #12]\n"
-      "str r2, [r1, #16]\n"
-      "str r2, [r1, #20]\n"
-      "str r2, [r1, #24]\n"
-      "str r2, [r1, #28]\n"
-      "dmb sy\n"
       "ldr r0, =__idle_stack_base\n"
       "msr msplim, r0\n"
       "b bk7258_start\n"
