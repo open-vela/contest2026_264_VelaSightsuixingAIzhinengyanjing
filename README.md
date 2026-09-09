@@ -55,6 +55,7 @@ autoflash.sh                 BK7258 固件自动烧录脚本
 - [项目技能规范](docs/SKILLS.md)
 - [GitHub 开发指南](docs/github开发指南.md)
 - [基础适配门禁验收记录](docs/8.16基础适配门禁验收记录.md)
+- [环境复原与自动烧录复现记录](docs/BK7258环境复原与自动烧录复现记录.md)
 - [Wi-Fi 使用说明](docs/WiFi使用说明.md)
 - [移植方案索引](docs/plans/README.md)
 
