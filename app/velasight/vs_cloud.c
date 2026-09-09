@@ -3073,7 +3073,7 @@ int vs_cloud_clock_sync(void)
    * On the stack rather than through cloud_alloc(): the other callers
    * allocate because their responses run to kilobytes, this one is a fixed
    * 250-odd bytes, and 512 of the worker's 8192-byte stack costs the boot heap
-   * that docs/SKILLS.md 3.7 is about exactly nothing -- unlike a static
+   * that SKILLS.md 3.7 is about exactly nothing -- unlike a static
    * buffer, which would come straight out of it.
    */
 

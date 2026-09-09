@@ -52,7 +52,7 @@ autoflash.sh                 BK7258 固件自动烧录脚本
 
 - [固件构建步骤](docs/固件构建步骤.md)
 - [外部完整文件 overlay](external/README.md)
-- [项目技能规范](docs/SKILLS.md)
+- [项目技能规范](SKILLS.md)
 - [GitHub 开发指南](docs/github开发指南.md)
 - [基础适配门禁验收记录](docs/8.16基础适配门禁验收记录.md)
 - [环境复原与自动烧录复现记录](docs/BK7258环境复原与自动烧录复现记录.md)
@@ -150,7 +150,7 @@ ap_console open
 ## 五、AI Coding 使用说明
 
 AI 参与了需求拆解、源码取证、移植方案设计、驱动实现、构建错误定位、串口日志
-分析、实板验证和文档维护。项目使用 [docs/SKILLS.md](docs/SKILLS.md) 固定架构约束、
+分析、实板验证和文档维护。项目使用 [SKILLS.md](SKILLS.md) 固定架构约束、
 仓库职责、任务路由和验证门禁，再由 `docs/plans/` 中的子系统方案维护协议细节和
 测试矩阵，避免让历史结论覆盖当前源码、最终配置和实板证据。
 
