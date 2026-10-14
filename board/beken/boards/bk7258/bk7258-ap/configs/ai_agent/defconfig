@@ -207,6 +207,14 @@ CONFIG_NET=y
 CONFIG_NET_BROADCAST=y
 CONFIG_NET_STATISTICS=y
 CONFIG_NETDB_DNSCLIENT=y
+# NuttX waits 30 s for each of 3 attempts by default, so a lookup on a link
+# that has gone silent holds its caller for 90 s, and the social cloud's
+# lookups run under the one lock every cleartext call shares.  Measured
+# 2026-10-14 with the uplink black-holed: a poll that had to reconnect sat
+# in getaddrinfo() from t+21 s to t+111 s, the stop could not begin behind
+# it, and the UI gave up on the session.  5 s x 2 is the glibc default.
+CONFIG_NETDB_DNSCLIENT_RECV_TIMEOUT=5
+CONFIG_NETDB_DNSCLIENT_RETRIES=2
 CONFIG_NETDEVICES=y
 CONFIG_NETDEV_IFINDEX=y
 CONFIG_NETDEV_IOCTL=y

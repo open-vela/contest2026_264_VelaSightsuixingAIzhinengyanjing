@@ -3591,6 +3591,14 @@ int vs_cloud_social_upload(const char *session_id,
 
   if (http < 0)
     {
+      /* Printed because it was the one silent failure here.  On a link
+       * that has died, these are what an upload worker spends its time on,
+       * and with nothing printed a stop draining the queue looked like a
+       * hang.
+       */
+
+      printf("%s: upload register failed: %d after %lu ms\n", CLOUD_TAG,
+             http, (unsigned long)out->register_ms);
       ret = http;
       goto out;
     }

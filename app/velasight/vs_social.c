@@ -290,6 +290,21 @@
 
 #define SOCIAL_BACKLOG_WINDOW_MS 15000u
 
+/* How far into the stop the uploader keeps sending what is still queued.
+ * See social_upload_discard().
+ *
+ * The UI gives the stopping stage VS_SOCIAL_STAGE_TIMEOUT_MS, 40 s, and an
+ * upload already in flight when this runs out still takes its own bounds.
+ * On a link that has gone silent, a PUT whose send had queued part of its
+ * body returns that part after one CONFIG_VS_SOCIAL_IO_TIMEOUT_MS and fails
+ * on the next, 16 s (measured 2026-10-14).  A call that has to open a new
+ * connection first pays the resolver's 10 s (see the defconfig); cleartext
+ * then adds the fallback nameservers' 2 s and a 3 s connect, 15 s, and TLS
+ * an 8 s connect, 18 s.  20 s plus the longest of those stays inside 40.
+ */
+
+#define SOCIAL_DRAIN_BUDGET_MS 20000u
+
 /* The longest single sleep the capture thread takes while waiting for its
  * next frame.  Slicing the wait is what lets a pause, a finalize or a change
  * of interval take effect promptly now that the interval can be several
@@ -757,6 +772,12 @@ struct social_state_s
    */
 
   uint32_t dropped_stale;
+
+  /* Queued uploads abandoned unsent because the stop ran out of time for
+   * them or the session was aborted; see social_upload_discard().
+   */
+
+  uint32_t dropped_drain;
   uint32_t uploaded;
   uint32_t upload_failed;
 
@@ -3427,6 +3448,69 @@ out:
  * The upload thread
  ****************************************************************************/
 
+/****************************************************************************
+ * Name: social_upload_discard
+ *
+ * Description:
+ *   Whether slot is to be dropped unsent because the stop has no time left
+ *   for it, releasing it if so.
+ *
+ *   The stop joins the uploader only once it has drained the rings, and the
+ *   UI gives that stage 40 s.  On a working link the drain is a few
+ *   transfers.  On a dead one every queued item fails on its own timeout:
+ *   measured 2026-10-14 with the uplink black-holed four seconds before the
+ *   stop, stopping capture took 32.9 s while the queued items failed one by
+ *   one, each waiting out a cloud timeout and then a backoff doubling toward
+ *   its 8 s ceiling.  The audio ring alone holds
+ *   CONFIG_VS_SOCIAL_AUDIO_QUEUE_SLOTS chunks, so a link that died well
+ *   before the stop keeps the drain going past the stage budget: with it
+ *   dead for 30 s first, 16 items were still queued when this cut in.  The
+ *   UI then reports the stop as stuck, and the next session is refused
+ *   until the drain ends.
+ *
+ *   So past SOCIAL_DRAIN_BUDGET_MS into the stop, what is still queued is
+ *   dropped.  The tail of a conversation is lost only when the link could
+ *   not have carried it in time anyway.  After an abort nothing is sent at
+ *   all: the session is being abandoned, and its uploads have no minutes to
+ *   feed.
+ *
+ ****************************************************************************/
+
+static bool social_upload_discard(struct social_slot_s *slot)
+{
+  bool aborted;
+  bool drop;
+  bool first = false;
+
+  pthread_mutex_lock(&g_social.lock);
+  aborted = g_social.abort;
+  drop = aborted ||
+         (g_social.finalize_began_ms != 0 &&
+          social_now_ms() - g_social.finalize_began_ms >=
+          SOCIAL_DRAIN_BUDGET_MS);
+  if (drop)
+    {
+      first = g_social.dropped_drain++ == 0;
+    }
+
+  pthread_mutex_unlock(&g_social.lock);
+
+  if (!drop)
+    {
+      return false;
+    }
+
+  social_free(slot->data, slot->from_psram);
+  if (first)
+    {
+      printf("%s: %s, dropping the uploads still queued\n", SOCIAL_TAG,
+             aborted ? "session aborted" :
+                       "the stop is out of time for uploads");
+    }
+
+  return true;
+}
+
 static void *social_upload_worker(void *arg)
 {
   uint32_t backoff_ms = 0;
@@ -3452,7 +3536,15 @@ static void *social_upload_worker(void *arg)
        * this exists for.
        */
 
-      if (backoff_ms != 0)
+      /* Not once the stop has begun, though.  The backoff keeps a failing
+       * cloud from being asked five times a second for as long as capture
+       * keeps feeding the queue, and once the producers have stopped the
+       * queue is finite: what is left is a few items the stop is waiting on,
+       * and sleeping up to the 8 s ceiling between them only spends its
+       * budget.  See social_upload_discard().
+       */
+
+      if (backoff_ms != 0 && !*(const volatile bool *)&g_social.stop_capture)
         {
           usleep(backoff_ms * 1000);
         }
@@ -3460,6 +3552,12 @@ static void *social_upload_worker(void *arg)
       if (!social_queue_pop(&slot))
         {
           break;
+        }
+
+      if (social_upload_discard(&slot))
+        {
+          backoff_ms = 0;
+          continue;
         }
 
       memset(&packet, 0, sizeof(packet));
@@ -4970,6 +5068,8 @@ static void social_log_capture_level(void);
 
 static void social_stop_producers(void)
 {
+  bool joined;
+
   pthread_mutex_lock(&g_social.lock);
   g_social.stop_capture = true;
   g_social.paused       = false;
@@ -5029,9 +5129,20 @@ static void social_stop_producers(void)
    * the abandon paths -- does not join a thread twice.
    */
 
+  joined = g_social.upload_count > 0;
   while (g_social.upload_count > 0)
     {
       pthread_join(g_social.upload_thread[--g_social.upload_count], NULL);
+    }
+
+  /* Read without the lock: every thread that counts these has been joined.
+   * Once per session, though this function may run twice.
+   */
+
+  if (joined && g_social.dropped_drain > 0)
+    {
+      printf("%s: %lu queued upload(s) dropped at the stop\n", SOCIAL_TAG,
+             (unsigned long)g_social.dropped_drain);
     }
 
   /* The microphone's counters, after the only thread reading it has stopped so
@@ -6310,6 +6421,7 @@ int vs_social_start(uint32_t request_id)
   g_social.dropped_image  = 0;
   g_social.dropped_audio  = 0;
   g_social.dropped_stale  = 0;
+  g_social.dropped_drain  = 0;
   g_social.uploaded       = 0;
   g_social.upload_failed  = 0;
   g_social.frames_malformed = 0;
