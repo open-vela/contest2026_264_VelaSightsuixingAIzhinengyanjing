@@ -24,13 +24,14 @@
 #include <unistd.h>
 
 #include "velasight_provisioning.h"
+#include "vp_store.h"
 
 static volatile bool g_interrupted;
 
 static void provision_usage(void)
 {
   printf("usage: provision_web [run [port] [--one-shot]] | selftest | show |"
-         " path\n"
+         " path | wifi <ssid> [password]\n"
          "\n"
          "  run       serve the provisioning page until Ctrl-C.  port\n"
          "            defaults to %d.  --one-shot returns after the first\n"
@@ -40,6 +41,9 @@ static void provision_usage(void)
          "            network; needs no phone.\n"
          "  show      print the stored network, never the passphrase\n"
          "  path      print the store path\n"
+         "  wifi      store a new network, keeping the keys and the cloud\n"
+         "            endpoint; no password means an open network.  Applied\n"
+         "            at the next boot.\n"
          "\n"
          "This service never changes the Wi-Fi role.  Put the board into\n"
          "SoftAP first (see docs/WiFi使用说明.md) and switch back afterwards.\n"
@@ -367,6 +371,75 @@ static int provision_selftest(void)
   return g_selftest_failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+/****************************************************************************
+ * Name: provision_wifi
+ *
+ * Description:
+ *   Store a new network from the console, for a bench whose Wi-Fi has
+ *   changed with no phone at hand to reach the setup page.  Every other field
+ *   of the record -- the API keys, the cloud endpoint -- is carried over from
+ *   the stored one, the same way the page merges a partial submit.
+ *
+ *   Written with the page's own store calls and a new generation, so a boot
+ *   loads it like any save.  The running UI keeps its network until then: it
+ *   reloads the record only when its own listener reports a save.
+ *
+ ****************************************************************************/
+
+static int provision_wifi(int argc, char *argv[])
+{
+  struct velasight_prov_credentials_s cred;
+  const char *password = argc > 3 ? argv[3] : "";
+  size_t ssid_len = argc > 2 ? strlen(argv[2]) : 0;
+  size_t psk_len = strlen(password);
+  int ret;
+
+  if (argc < 3 || argc > 4 || ssid_len == 0 ||
+      ssid_len > VELASIGHT_PROV_SSID_MAX ||
+      (psk_len != 0 && (psk_len < VELASIGHT_PROV_PSK_MIN ||
+                        psk_len > VELASIGHT_PROV_PSK_MAX)))
+    {
+      printf("provision_web: wifi takes an ssid of 1..%d bytes and an "
+             "optional password of %d..%d\n", VELASIGHT_PROV_SSID_MAX,
+             VELASIGHT_PROV_PSK_MIN, VELASIGHT_PROV_PSK_MAX);
+      return EXIT_FAILURE;
+    }
+
+  ret = velasight_provisioning_load(&cred);
+  if (ret == -ENOENT)
+    {
+      memset(&cred, 0, sizeof(cred));
+    }
+  else if (ret < 0)
+    {
+      /* A record that does not decode is left alone rather than replaced:
+       * it may still hold the only copy of the keys.
+       */
+
+      printf("provision_web: cannot read %s: %d, nothing saved\n",
+             CONFIG_VELASIGHT_PROVISION_STORE, ret);
+      return EXIT_FAILURE;
+    }
+
+  snprintf(cred.ssid, sizeof(cred.ssid), "%s", argv[2]);
+  snprintf(cred.password, sizeof(cred.password), "%s", password);
+  cred.open_network = psk_len == 0;
+  cred.generation =
+    vp_store_next_generation(CONFIG_VELASIGHT_PROVISION_STORE);
+
+  ret = vp_store_save(CONFIG_VELASIGHT_PROVISION_STORE, &cred);
+  if (ret < 0)
+    {
+      printf("provision_web: save failed: %d\n", ret);
+      return EXIT_FAILURE;
+    }
+
+  printf("provision_web: saved ssid=%s security=%s generation=%u, "
+         "reboot to apply\n", cred.ssid,
+         cred.open_network ? "open" : "wpa2", (unsigned)cred.generation);
+  return EXIT_SUCCESS;
+}
+
 int main(int argc, FAR char *argv[])
 {
   const char *command = argc > 1 ? argv[1] : "run";
@@ -390,6 +463,11 @@ int main(int argc, FAR char *argv[])
     {
       printf("%s\n", CONFIG_VELASIGHT_PROVISION_STORE);
       return EXIT_SUCCESS;
+    }
+
+  if (strcmp(command, "wifi") == 0)
+    {
+      return provision_wifi(argc, argv);
     }
 
   provision_usage();
