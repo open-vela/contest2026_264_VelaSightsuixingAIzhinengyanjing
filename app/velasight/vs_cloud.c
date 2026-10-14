@@ -2066,12 +2066,21 @@ static int cloud_plain_http(const struct cloud_url_s *url, const char *method,
 }
 
 /****************************************************************************
- * Name: cloud_http
+ * Name: cloud_http_ex
  *
  * Description:
  *   Dispatch one exchange to the right transport and normalise the result.
  *   vela_tls.c reports its own error space (VELA_TLS_ERR_*); everything past
  *   this point sees HTTP status codes and negative errnos only.
+ *
+ *   timeout_ms bounds every wait of a buffered TLS exchange; see
+ *   vela_https_request_bounded().  0 keeps vela_tls.c's defaults, which
+ *   let a receive wait two minutes and a send for as long as TCP keeps
+ *   retransmitting.  The cleartext path is bounded already, by
+ *   CONFIG_VS_SOCIAL_CONNECT_TIMEOUT_MS and CONFIG_VS_SOCIAL_IO_TIMEOUT_MS
+ *   in cloud_connect().  The streaming path keeps the defaults: the
+ *   spoken-minutes download behind it enforces its own deadline, from its
+ *   sink and between Range windows; see vs_cloud_download_to_file().
  *
  ****************************************************************************/
 
@@ -2079,7 +2088,8 @@ static int cloud_http_ex(const struct cloud_url_s *url, const char *method,
                          const vela_header_t *headers,
                          const void *body, size_t body_len,
                          char *resp, size_t resp_cap, size_t *resp_len,
-                         vela_body_sink_t sink, void *sink_arg)
+                         vela_body_sink_t sink, void *sink_arg,
+                         unsigned int timeout_ms)
 {
   int ret;
 
@@ -2097,9 +2107,10 @@ static int cloud_http_ex(const struct cloud_url_s *url, const char *method,
     }
   else
     {
-      ret = vela_https_request(url->host, url->port, method, url->path,
-                               headers, (const char *)body, body_len, resp,
-                               resp_cap, resp_len);
+      ret = vela_https_request_bounded(url->host, url->port, method,
+                                       url->path, headers,
+                                       (const char *)body, body_len, resp,
+                                       resp_cap, resp_len, timeout_ms);
     }
   if (ret > 0)
     {
@@ -2139,6 +2150,9 @@ static int cloud_http_ex(const struct cloud_url_s *url, const char *method,
       case VELA_TLS_ERR_PROTOCOL:
         return -EPROTO;
 
+      case VELA_TLS_ERR_TIMEOUT:
+        return -ETIMEDOUT;
+
       default:
         return ret < 0 ? ret : -EIO;
     }
@@ -2159,7 +2173,7 @@ static int cloud_http(const struct cloud_url_s *url, const char *method,
                       char *resp, size_t resp_cap, size_t *resp_len)
 {
   return cloud_http_ex(url, method, headers, body, body_len, resp, resp_cap,
-                       resp_len, NULL, NULL);
+                       resp_len, NULL, NULL, 0);
 }
 
 /****************************************************************************
@@ -3687,10 +3701,20 @@ int vs_cloud_social_upload(const char *session_id,
   headers[1].name = NULL;
   headers[1].value = NULL;
 
+  /* Bounded like the cleartext calls, at CONFIG_VS_SOCIAL_IO_TIMEOUT_MS per
+   * wait.  With vela_tls.c's defaults a PUT on a link that stalled sat in a
+   * send or a receive for minutes, and the stop that joins this worker has
+   * 40 s: measured 2026-10-13 (vs-264-3d0b8cd1), a pooled PUT went silent
+   * after "image 1/4", the stop timed out on that join, and the next session
+   * was refused until the PUT gave up.  On a working link the same PUTs
+   * averaged 349 ms, 1595 ms at worst, over three sessions that day.
+   */
+
   began = cloud_uptime_ms();
-  http = cloud_http(url, "PUT", CLOUD_UPLOAD_SEND_CT ? headers : NULL,
-                    packet->data, packet->len, resp,
-                    CONFIG_VS_SOCIAL_REG_RESP_BYTES, NULL);
+  http = cloud_http_ex(url, "PUT", CLOUD_UPLOAD_SEND_CT ? headers : NULL,
+                       packet->data, packet->len, resp,
+                       CONFIG_VS_SOCIAL_REG_RESP_BYTES, NULL, NULL, NULL,
+                       CONFIG_VS_SOCIAL_IO_TIMEOUT_MS);
   out->transfer_ms = (uint32_t)(cloud_uptime_ms() - began);
 
   if (http < 0)
@@ -5549,7 +5573,7 @@ int vs_cloud_download_to_file(const char *url, const char *path,
 
       http = cloud_http_ex(parsed, "GET", window != 0 ? headers : NULL, NULL,
                            0, scratch, CONFIG_VS_SOCIAL_REG_RESP_BYTES, NULL,
-                           cloud_file_sink, &sink);
+                           cloud_file_sink, &sink, 0);
       got = sink.written - before;
       requests++;
 

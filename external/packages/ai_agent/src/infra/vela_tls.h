@@ -34,6 +34,8 @@ extern "C" {
 #define VELA_TLS_ERR_OVERFLOW  -5
 #define VELA_TLS_ERR_SINK      -6  /* the caller's body sink refused a write */
 #define VELA_TLS_ERR_PROTOCOL  -7  /* malformed chunked framing            */
+#define VELA_TLS_ERR_TIMEOUT   -8  /* a bounded request ran out of time;
+                                    * vela_https_request_bounded() only */
 
 /**
  * Extra header entry; pass an array terminated by {NULL, NULL}.
@@ -85,6 +87,44 @@ int vela_https_request(
     char             *resp_buf,
     size_t            resp_cap,
     size_t           *out_body_len  /* optional: actual body bytes written, or NULL */
+);
+
+/**
+ * As vela_https_request(), with every network wait of this one request
+ * bounded by timeout_ms.
+ *
+ * The defaults suit an LLM that can think for a minute: a receive waits up
+ * to AGENT_LLM_SOCKET_TIMEOUT_SEC, a send for as long as TCP keeps
+ * retransmitting, and a new connection for as long as the stack keeps
+ * resending its SYN.  On a link that stalls mid-request that holds the
+ * caller for minutes.  Here the TCP connect of a new connection, each
+ * handshake read, and each send and receive give up after timeout_ms.
+ *
+ * A request that fails after waiting out its bound returns
+ * VELA_TLS_ERR_TIMEOUT and is not retried on a new connection, which the
+ * stale-connection retry would otherwise do.  A pooled connection gets its
+ * default timeouts back before it is released, so later requests on it
+ * are unaffected.
+ *
+ * This bounds waiting, not the request: a transfer that keeps making
+ * progress is not cut off, and name resolution goes through the system
+ * resolver unbounded (its cache normally answers for a host in use).  So
+ * the worst case is a few multiples of timeout_ms, not timeout_ms.
+ *
+ * @param timeout_ms  Per-wait bound.  0 behaves as vela_https_request().
+ */
+int vela_https_request_bounded(
+    const char       *host,
+    const char       *port,
+    const char       *method,
+    const char       *path,
+    const vela_header_t *headers,
+    const char       *body,
+    size_t            body_len,
+    char             *resp_buf,
+    size_t            resp_cap,
+    size_t           *out_body_len,
+    unsigned int      timeout_ms
 );
 
 /**

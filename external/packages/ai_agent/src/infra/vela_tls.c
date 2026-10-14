@@ -31,6 +31,8 @@
 
 /* POSIX networking */
 #include <netdb.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -396,7 +398,176 @@ void vela_tls_pool_cleanup(void)
     pthread_mutex_unlock(&s_pool_lock);
 }
 
-static int tls_ctx_connect(tls_ctx_t* ctx, const char* host, const char* port)
+/* ── Bounded requests ────────────────────────────────────────── */
+
+static uint64_t tls_now_ms(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* Apply one request's bound to a connection's sends and receives, or with
+ * timeout_ms 0 put back the defaults every connection is opened with.
+ *
+ * The defaults suit an LLM that can think for a minute before its first
+ * byte: AGENT_LLM_SOCKET_TIMEOUT_SEC to receive and, outside the RPMSG
+ * transport, no send timeout at all, so a send waits for as long as TCP
+ * keeps retransmitting.  A zero timeval is "no timeout" to setsockopt().
+ */
+static void tls_set_timeouts(int fd, unsigned int timeout_ms)
+{
+    struct timeval rcv;
+    struct timeval snd;
+
+    if (timeout_ms != 0) {
+        rcv.tv_sec = (time_t)(timeout_ms / 1000u);
+        rcv.tv_usec = (long)((timeout_ms % 1000u) * 1000u);
+        snd = rcv;
+    } else {
+#ifdef CONFIG_AI_AGENT_NET_RPMSG
+        rcv.tv_sec = network_get_read_timeout();
+        snd.tv_sec = network_get_connect_timeout();
+#else
+        rcv.tv_sec = AGENT_LLM_SOCKET_TIMEOUT_SEC;
+        snd.tv_sec = 0;
+#endif
+        rcv.tv_usec = 0;
+        snd.tv_usec = 0;
+    }
+
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcv, sizeof(rcv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd));
+}
+
+/* mbedtls_net_connect() with the TCP connect bounded by timeout_ms.
+ *
+ * A blocking connect() on NuttX waits until the stack gives up on its SYN
+ * retransmissions, CONFIG_NET_TCP_MAXSYNRTX of them with a doubling RTO,
+ * and neither socket timeout shortens that.  So this connects non-blocking
+ * and polls for writability, the way the cleartext clients in this tree do.
+ * A timed-out address ends the attempt rather than moving on to the next:
+ * the link that stalled is the one the next address would be tried over.
+ *
+ * Name resolution is not bounded here.  It goes through the system
+ * resolver, whose cache normally answers for a host already in use.
+ */
+static int tls_net_connect_bounded(mbedtls_net_context* net,
+    const char* host, const char* port, unsigned int timeout_ms)
+{
+    struct addrinfo hints;
+    struct addrinfo* list = NULL;
+    struct addrinfo* cur;
+    int ret = VELA_TLS_ERR_CONNECT;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    if (getaddrinfo(host, port, &hints, &list) != 0 || list == NULL) {
+        syslog(LOG_ERR, "[%s] cannot resolve %s\n", TAG, host);
+        return VELA_TLS_ERR_CONNECT;
+    }
+
+    for (cur = list; cur != NULL; cur = cur->ai_next) {
+        struct pollfd pfd;
+        socklen_t len = sizeof(int);
+        int err = 0;
+        int flags;
+        int fd;
+        int n;
+
+        fd = socket(cur->ai_family, cur->ai_socktype, cur->ai_protocol);
+        if (fd < 0)
+            continue;
+
+        flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+        if (connect(fd, cur->ai_addr, cur->ai_addrlen) < 0) {
+            if (errno != EINPROGRESS) {
+                err = errno;
+            } else {
+                pfd.fd = fd;
+                pfd.events = POLLOUT;
+                pfd.revents = 0;
+                n = poll(&pfd, 1, (int)timeout_ms);
+                if (n == 0) {
+                    syslog(LOG_WARNING,
+                        "[%s] connect %s:%s: no answer in %u ms\n",
+                        TAG, host, port, timeout_ms);
+                    close(fd);
+                    ret = VELA_TLS_ERR_TIMEOUT;
+                    break;
+                }
+
+                /* POLLOUT alone does not mean connected: a refused
+                 * connect wakes the poll too, and only SO_ERROR says
+                 * which happened.
+                 */
+                if (n < 0) {
+                    err = errno;
+                } else if ((pfd.revents & POLLOUT) == 0) {
+                    err = ECONNREFUSED;
+                } else if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err,
+                               &len) != 0) {
+                    err = errno;
+                }
+            }
+        }
+
+        if (err == 0) {
+            fcntl(fd, F_SETFL, flags);
+            net->fd = fd;
+            ret = 0;
+            break;
+        }
+
+        syslog(LOG_ERR, "[%s] connect %s:%s: %d\n", TAG, host, port, err);
+        close(fd);
+        ret = VELA_TLS_ERR_CONNECT;
+    }
+
+    freeaddrinfo(list);
+    return ret;
+}
+
+/* What a failed bounded attempt reports.  A step that ran into SO_RCVTIMEO
+ * or SO_SNDTIMEO surfaces from mbedTLS as an ordinary read or write error,
+ * so an attempt that failed after running for its whole bound is reported
+ * as having timed out.  Answers that are not about the link -- a header
+ * that did not fit, a sink that refused, framing this side could not
+ * follow -- keep their own codes.
+ */
+static int tls_bounded_error(int ret, uint64_t began_ms,
+    unsigned int timeout_ms)
+{
+    if (timeout_ms != 0 && tls_now_ms() - began_ms >= timeout_ms &&
+        (ret == VELA_TLS_ERR_CONNECT || ret == VELA_TLS_ERR_HANDSHAKE ||
+            ret == VELA_TLS_ERR_WRITE || ret == VELA_TLS_ERR_READ)) {
+        return VELA_TLS_ERR_TIMEOUT;
+    }
+
+    return ret;
+}
+
+/* pool_release() for a request that may have carried its own bound.  A
+ * connection going back into the pool gets the defaults back first, so the
+ * next request on it is not held to this one's timeouts.
+ */
+static void pool_release_bounded(conn_slot_t* s, const char* host,
+    const char* port, bool keep, unsigned int timeout_ms)
+{
+    if (keep && timeout_ms != 0 && s->ctx.net.fd >= 0)
+        tls_set_timeouts(s->ctx.net.fd, 0);
+
+    pool_release(s, host, port, keep);
+}
+
+static int tls_ctx_connect(tls_ctx_t* ctx, const char* host,
+    const char* port, unsigned int timeout_ms)
 {
     int ret;
 
@@ -437,7 +608,8 @@ static int tls_ctx_connect(tls_ctx_t* ctx, const char* host, const char* port)
 #endif
 
     if (http_proxy_is_enabled()) {
-        int tunnel_fd = proxy_open_tunnel(host, atoi(port), 30000);
+        int tunnel_fd = proxy_open_tunnel(host, atoi(port),
+            timeout_ms != 0 ? (int)timeout_ms : 30000);
         if (tunnel_fd < 0) {
             syslog(LOG_ERR, "[%s] proxy tunnel to %s:%s failed\n",
                 TAG, host, port);
@@ -446,6 +618,12 @@ static int tls_ctx_connect(tls_ctx_t* ctx, const char* host, const char* port)
         ctx->net.fd = tunnel_fd;
         syslog(LOG_INFO, "[%s] Using proxy tunnel fd=%d for %s:%s\n",
             TAG, tunnel_fd, host, port);
+    } else if (timeout_ms != 0) {
+        if ((ret = tls_net_connect_bounded(&ctx->net, host, port,
+                 timeout_ms))
+            != 0) {
+            return ret;
+        }
     } else {
         if ((ret = mbedtls_net_connect(&ctx->net, host, port,
                  MBEDTLS_NET_PROTO_TCP))
@@ -456,30 +634,16 @@ static int tls_ctx_connect(tls_ctx_t* ctx, const char* host, const char* port)
         }
     }
 
-    /* Force blocking mode and set socket-level read timeout.
+    /* Force blocking mode and set socket-level timeouts.
      * This avoids using select()/poll() inside mbedtls_net_recv_timeout
      * which returns MBEDTLS_ERR_NET_POLL_FAILED (-0x0047) on NuttX/QEMU.
-     * Timeout is configured via AGENT_LLM_SOCKET_TIMEOUT_SEC in
+     * The default read timeout is AGENT_LLM_SOCKET_TIMEOUT_SEC in
      * agent_config.h.  LLM APIs (especially kimi with thinking mode)
-     * can take over 60s for long responses. */
+     * can take over 60s for long responses.  A bounded request uses its
+     * own bound instead, from the handshake on; see tls_set_timeouts(). */
     mbedtls_net_set_block(&ctx->net);
     if (ctx->net.fd >= 0) {
-#ifdef CONFIG_AI_AGENT_NET_RPMSG
-        int read_timeout_sec = network_get_read_timeout();
-        struct timeval tv = { .tv_sec = read_timeout_sec, .tv_usec = 0 };
-#else
-        struct timeval tv = { .tv_sec = AGENT_LLM_SOCKET_TIMEOUT_SEC,
-            .tv_usec = 0 };
-#endif
-        setsockopt(ctx->net.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-#ifdef CONFIG_AI_AGENT_NET_RPMSG
-        {
-            int timeout_sec = network_get_connect_timeout();
-            struct timeval ctv = { .tv_sec = timeout_sec, .tv_usec = 0 };
-            setsockopt(ctx->net.fd, SOL_SOCKET, SO_SNDTIMEO, &ctv, sizeof(ctv));
-        }
-#endif
+        tls_set_timeouts(ctx->net.fd, timeout_ms);
     }
 
     /* SSL config: client, TLS, default ciphersuites */
@@ -891,6 +1055,13 @@ static int tls_read_response(tls_ctx_t* ctx, char* resp_buf, size_t resp_cap,
             } else if (ret == 0 || ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
                 break;
             } else if (ret != MBEDTLS_ERR_SSL_WANT_READ) {
+                /* A read that failed part way through the body, a timeout
+                 * among them, leaves the socket at an offset this side
+                 * does not know.  The truncated body is still returned,
+                 * as before, but the connection must not be reused.
+                 */
+                if (out_keep_alive)
+                    *out_keep_alive = false;
                 break;
             }
         }
@@ -919,6 +1090,9 @@ static int tls_read_response(tls_ctx_t* ctx, char* resp_buf, size_t resp_cap,
  * payload, so the connection handling -- pool reuse, the stale-connection
  * drain, the ephemeral fallback when every slot is busy -- is written once
  * here.  sink NULL selects buffered.
+ *
+ * timeout_ms 0 is the unbounded behaviour every caller had before
+ * vela_https_request_bounded(); see that function for what a bound changes.
  */
 
 static int tls_do_request(
@@ -933,8 +1107,10 @@ static int tls_do_request(
     size_t resp_cap,
     size_t* out_body_len,
     vela_body_sink_t sink,
-    void* sink_arg)
+    void* sink_arg,
+    unsigned int timeout_ms)
 {
+    uint64_t began;
     int ret;
 
     /* Try to get a pooled connection first */
@@ -958,6 +1134,11 @@ static int tls_do_request(
             /* Restore original timeout */
             setsockopt(slot->ctx.net.fd, SOL_SOCKET, SO_RCVTIMEO,
                 &tv_orig, sizeof(tv_orig));
+            /* A bounded request holds the connection to its own bound
+             * from here on; pool_release_bounded() puts the defaults back
+             * before anything else can use it. */
+            if (timeout_ms != 0)
+                tls_set_timeouts(slot->ctx.net.fd, timeout_ms);
             /* If peer closed the connection, reconnect */
             if (dr == 0 || dr == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
                 goto pool_reconnect;
@@ -968,6 +1149,7 @@ static int tls_do_request(
 
         /* Reuse existing connection — skip TLS handshake */
         syslog(LOG_DEBUG, "[%s] Reusing pooled connection to %s:%s\n", TAG, host, port);
+        began = tls_now_ms();
         ret = tls_write_request(&slot->ctx, method, host, path, headers, body, body_len);
         if (ret == 0) {
             size_t got = 0;
@@ -984,7 +1166,7 @@ static int tls_do_request(
                 *out_body_len = got;
 
             if (ret > 0) {
-                pool_release(slot, host, port, keep);
+                pool_release_bounded(slot, host, port, keep, timeout_ms);
                 return ret;
             }
 
@@ -1005,6 +1187,25 @@ static int tls_do_request(
                 return ret;
             }
         }
+
+        /* Nor one that ran out a bounded request's time.  The retry is for
+         * a connection that went stale while idle, which fails at once.
+         * One that waited out its whole bound is a link that stalled, and
+         * the new connection would go over the same link: retrying would
+         * spend the caller's bound a second time, plus a connect and a
+         * handshake, on the same outcome.
+         */
+
+        ret = tls_bounded_error(ret, began, timeout_ms);
+        if (ret == VELA_TLS_ERR_TIMEOUT) {
+            syslog(LOG_WARNING,
+                "[%s] %s %s:%s failed after %u ms on a pooled connection "
+                "(bound %u ms), not retrying\n", TAG, method, host, port,
+                (unsigned)(tls_now_ms() - began), timeout_ms);
+            pool_release(slot, host, port, false);
+            return ret;
+        }
+
         /* Connection went stale — fall through to reconnect */
     pool_reconnect:
         syslog(LOG_INFO, "[%s] Pooled connection stale, reconnecting\n", TAG);
@@ -1013,30 +1214,31 @@ static int tls_do_request(
     }
 
     /* New connection */
+    began = tls_now_ms();
     if (!slot) {
         /* Pool full — use a temporary ephemeral context */
         tls_ctx_t tmp_ctx;
-        if ((ret = tls_ctx_connect(&tmp_ctx, host, port)) != 0) {
+        if ((ret = tls_ctx_connect(&tmp_ctx, host, port, timeout_ms)) != 0) {
             tls_ctx_free(&tmp_ctx);
-            return ret;
+            return tls_bounded_error(ret, began, timeout_ms);
         }
         if ((ret = tls_write_request(&tmp_ctx, method, host, path,
                  headers, body, body_len))
             != 0) {
             syslog(LOG_ERR, "[%s] Write request failed: %d\n", TAG, ret);
             tls_ctx_free(&tmp_ctx);
-            return ret;
+            return tls_bounded_error(ret, began, timeout_ms);
         }
         ret = tls_read_response(&tmp_ctx, resp_buf, resp_cap, out_body_len, NULL,
             sink, sink_arg);
         tls_ctx_free(&tmp_ctx);
-        return ret;
+        return tls_bounded_error(ret, began, timeout_ms);
     }
 
     /* Connect into the slot */
-    if ((ret = tls_ctx_connect(&slot->ctx, host, port)) != 0) {
+    if ((ret = tls_ctx_connect(&slot->ctx, host, port, timeout_ms)) != 0) {
         pool_release(slot, host, port, false);
-        return ret;
+        return tls_bounded_error(ret, began, timeout_ms);
     }
 
     if ((ret = tls_write_request(&slot->ctx, method, host, path,
@@ -1044,14 +1246,14 @@ static int tls_do_request(
         != 0) {
         syslog(LOG_ERR, "[%s] Write request failed: %d\n", TAG, ret);
         pool_release(slot, host, port, false);
-        return ret;
+        return tls_bounded_error(ret, began, timeout_ms);
     }
 
     bool keep = false;
     ret = tls_read_response(&slot->ctx, resp_buf, resp_cap, out_body_len, &keep,
         sink, sink_arg);
-    pool_release(slot, host, port, ret > 0 && keep);
-    return ret;
+    pool_release_bounded(slot, host, port, ret > 0 && keep, timeout_ms);
+    return tls_bounded_error(ret, began, timeout_ms);
 }
 
 int vela_https_request(
@@ -1067,7 +1269,24 @@ int vela_https_request(
     size_t* out_body_len)
 {
     return tls_do_request(host, port, method, path, headers, body, body_len,
-        resp_buf, resp_cap, out_body_len, NULL, NULL);
+        resp_buf, resp_cap, out_body_len, NULL, NULL, 0);
+}
+
+int vela_https_request_bounded(
+    const char* host,
+    const char* port,
+    const char* method,
+    const char* path,
+    const vela_header_t* headers,
+    const char* body,
+    size_t body_len,
+    char* resp_buf,
+    size_t resp_cap,
+    size_t* out_body_len,
+    unsigned int timeout_ms)
+{
+    return tls_do_request(host, port, method, path, headers, body, body_len,
+        resp_buf, resp_cap, out_body_len, NULL, NULL, timeout_ms);
 }
 
 int vela_https_request_stream(
@@ -1092,7 +1311,7 @@ int vela_https_request_stream(
      */
 
     return tls_do_request(host, port, method, path, headers, body, body_len,
-        NULL, 0, out_body_len, sink, sink_arg);
+        NULL, 0, out_body_len, sink, sink_arg, 0);
 }
 
 int vela_https_get(const char* host, const char* port, const char* path,
@@ -1132,7 +1351,7 @@ int vela_https_head_date(const char* host, const char* port, const char* path,
     tls_ctx_t ctx;
     int ret;
 
-    if ((ret = tls_ctx_connect(&ctx, host, port)) != 0) {
+    if ((ret = tls_ctx_connect(&ctx, host, port, 0)) != 0) {
         tls_ctx_free(&ctx);
         return ret;
     }
