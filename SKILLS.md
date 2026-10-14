@@ -125,7 +125,7 @@ AP 的内核堆就是 336 KiB SRAM 区段在 `.bss` 之上的余量，没有独�
 up_allocate_heap() = __heap_start .. __heap_end
 __heap_start = _ebss 之上 0x1000     (bk7258_allocateheap.c)
 __heap_end   = 0x28064000
-当前实测      = 18408 B
+当前实测      = 18264 B     (2026-10-14，__heap_start = 0x2805f8a8)
 ```
 
 所以**任何 app 的静态数据（`.bss`/`.data`）都是从启动堆里直接扣的**，链接报告里的
