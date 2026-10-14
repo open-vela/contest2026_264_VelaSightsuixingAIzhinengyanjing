@@ -83,6 +83,7 @@
 #include "velasight_provisioning.h"
 
 #include "include/vs_cloud.h"
+#include "include/vs_dns.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -124,6 +125,19 @@
 #ifndef CONFIG_VS_SOCIAL_IO_TIMEOUT_MS
 #  define CONFIG_VS_SOCIAL_IO_TIMEOUT_MS 8000
 #endif
+
+#ifndef CONFIG_VS_SOCIAL_CLOUD_DNS
+#  define CONFIG_VS_SOCIAL_CLOUD_DNS ""
+#endif
+
+/* How long cloud_connect() waits for each CONFIG_VS_SOCIAL_CLOUD_DNS server.
+ * From the board, ping to both intranet resolvers measured 19-38 ms
+ * (2026-10-13), so a second is a wide margin.  On a network that cannot
+ * reach them, this is all a failing connect pays on top of a failure it was
+ * already headed for.
+ */
+
+#define CLOUD_DNS_TIMEOUT_MS 1000
 
 #ifndef CONFIG_VS_SOCIAL_DEVICE_ID
 #  define CONFIG_VS_SOCIAL_DEVICE_ID ""
@@ -1197,6 +1211,13 @@ static size_t cloud_decode_chunked(char *buf, size_t len)
  *   any DNS server is configured, and a resolver failure there would look
  *   like the cloud being unreachable.
  *
+ *   A name the network's resolver cannot find is next asked of
+ *   CONFIG_VS_SOCIAL_CLOUD_DNS, one server at a time, before the connect
+ *   gives up.  See include/vs_dns.h for the network that needs this.  Only
+ *   the socket address comes from those servers.  The Host header is written
+ *   from url->host in cloud_plain_http_once(), so the request still names
+ *   the host the gateway routes on.
+ *
  ****************************************************************************/
 
 static int cloud_connect(const char *host, const char *port)
@@ -1227,14 +1248,48 @@ static int cloud_connect(const char *host, const char *port)
       hints.ai_family = AF_INET;
       hints.ai_socktype = SOCK_STREAM;
 
-      if (getaddrinfo(host, port, &hints, &res) != 0 || res == NULL)
+      if (getaddrinfo(host, port, &hints, &res) == 0 && res != NULL)
+        {
+          sa = res->ai_addr;
+          salen = res->ai_addrlen;
+        }
+      else if (CONFIG_VS_SOCIAL_CLOUD_DNS[0] == '\0')
         {
           printf("%s: cannot resolve %s\n", CLOUD_TAG, host);
           return -EHOSTUNREACH;
         }
+      else
+        {
+          struct in_addr via;
+          char via_text[INET_ADDRSTRLEN];
+          char addr_text[INET_ADDRSTRLEN];
 
-      sa = res->ai_addr;
-      salen = res->ai_addrlen;
+          ret = vs_dns_resolve(CONFIG_VS_SOCIAL_CLOUD_DNS, host,
+                               CLOUD_DNS_TIMEOUT_MS, &addr.sin_addr, &via);
+          if (ret < 0)
+            {
+              printf("%s: cannot resolve %s, through the network's resolver "
+                     "or %s (%d)\n", CLOUD_TAG, host,
+                     CONFIG_VS_SOCIAL_CLOUD_DNS, ret);
+              return -EHOSTUNREACH;
+            }
+
+          /* Once per new connection, which a held connection makes rare.
+           * The line is the only evidence that the address did not come from
+           * the network, which is the first thing to know when the cloud
+           * answers from somewhere unexpected.
+           */
+
+          printf("%s: %s is not in this network's DNS; %s answered %s\n",
+                 CLOUD_TAG, host,
+                 inet_ntop(AF_INET, &via, via_text,
+                           sizeof(via_text)) != NULL ? via_text : "?",
+                 inet_ntop(AF_INET, &addr.sin_addr, addr_text,
+                           sizeof(addr_text)) != NULL ? addr_text : "?");
+
+          sa = (const struct sockaddr *)&addr;
+          salen = sizeof(addr);
+        }
     }
 
   sock = socket(AF_INET, SOCK_STREAM, 0);

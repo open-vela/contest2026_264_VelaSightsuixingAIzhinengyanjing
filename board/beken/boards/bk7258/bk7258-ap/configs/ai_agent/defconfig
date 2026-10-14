@@ -185,12 +185,17 @@ CONFIG_VS_COMBO_PRESS_MS=2000
 CONFIG_VS_SHORT_PRESS_MIN_MS=20
 CONFIG_VS_INPUT_POLL_MS=5
 CONFIG_VS_SHORT_PRESS_MAX_MS=500
+# The social cloud's default host is only in the intranet DNS view: public
+# resolvers answer NXDOMAIN for it, and so does a hotspot that forwards to
+# one, even when the hotspot routes to the intranet.  These two answer it, and
+# vs_cloud.c asks them only after the network's own resolver has failed.  See
+# app/velasight/include/vs_dns.h.
+CONFIG_VS_SOCIAL_CLOUD_DNS="10.234.254.10 10.234.253.10"
 CONFIG_MM_REGIONS=2
 CONFIG_NET=y
 CONFIG_NET_BROADCAST=y
 CONFIG_NET_STATISTICS=y
 CONFIG_NETDB_DNSCLIENT=y
-CONFIG_NETDB_DNSCLIENT_NAMESERVER1="114.114.114.114"
 CONFIG_NETDEVICES=y
 CONFIG_NETDEV_IFINDEX=y
 CONFIG_NETDEV_IOCTL=y

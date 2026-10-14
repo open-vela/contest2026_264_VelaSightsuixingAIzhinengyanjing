@@ -746,6 +746,32 @@ config VS_SOCIAL_IO_TIMEOUT_MS
 		connected.  Larger than the connect timeout because this also
 		covers the cloud thinking about a request, not just the link.
 
+config VS_SOCIAL_CLOUD_DNS
+	string "VelaSight social cloud fallback nameservers"
+	default ""
+	depends on LVX_USE_DEMO_CONTEST2026_264_VELASIGHT
+	---help---
+		IPv4 nameservers, separated by spaces or commas.  The cleartext
+		path asks them for the cloud's address when the network's own
+		resolver cannot find it.  Empty turns the fallback off.
+
+		This is for an endpoint that exists only in a private DNS view.
+		A network can route to such an endpoint and still hand out a
+		resolver that answers NXDOMAIN for it.  include/vs_dns.h has the
+		measured case, and explains why this is not a second system
+		nameserver.
+
+		Each server is asked once, in order, with a one-second wait, and
+		only after getaddrinfo() has failed.  A network whose resolver
+		finds the name never gets here.  On a network that reaches none
+		of these servers, a connect that was going to fail anyway fails
+		at most one second per entry later.  Only the socket address
+		comes from these servers.  The request still names the host,
+		and the gateway routes on that name.
+
+		Not consulted on the TLS path (VS_SOCIAL_CLOUD_TLS), whose
+		connections vela_tls.c resolves itself.
+
 # Session orchestration (app/velasight/vs_social.c).
 #
 # The schedule, not the protocol: how often to sample, how much to keep when
