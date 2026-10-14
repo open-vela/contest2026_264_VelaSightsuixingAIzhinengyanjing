@@ -15,6 +15,7 @@
 #define __APP_VELASIGHT_INCLUDE_VS_APP_H
 
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "vs_types.h"
@@ -156,5 +157,65 @@ int vs_app_take_event(struct vs_app_event_s *out);
 
 uint32_t vs_app_current_request_id(void);
 int velasight_autostart(void);
+
+/****************************************************************************
+ * Driving the running UI from another task.
+ *
+ * For the nsh commands in vs_cli.c, which operate the product the way a user
+ * does and read back what the screens show.  Neither call touches the UI's
+ * state from outside: a gesture goes into the queue the key task feeds, and
+ * the status is a copy the UI thread publishes every time it renders.
+ ****************************************************************************/
+
+/* What vs_app_get_status() returns.  error_retry is 0 none, 1 network,
+ * 2 social; softkey[] is the label of each key, empty when it is hidden.
+ */
+
+struct vs_app_status_s
+{
+  bool     ready;            /* the UI loop is running and taking input */
+  uint32_t seq;              /* bumped on every publish */
+  uint32_t inputs;           /* input events the UI has handled */
+  enum vs_page_e page;
+  uint32_t request_id;
+  enum vs_social_stage_e social_stage;
+  int      error;
+  bool     error_retryable;
+  uint8_t  error_retry;
+  bool     network_busy;
+  bool     voice_arming;
+  bool     voice_ending;
+  bool     photo_context;
+  bool     api_ready;
+  bool     history_blank;
+  bool     volume_editing;
+  bool     alert_active;
+  uint8_t  volume;
+  uint16_t history_index;
+  uint16_t history_count;
+  enum vs_emotion_e emotion;
+  enum vs_net_mode_e net_mode;
+  enum vs_net_state_e net_state;
+  char     net_ssid[33];
+  char     net_address[16];
+  char     error_reason[VS_TEXT_LONG];
+  char     content_title[VS_TEXT_SHORT];
+  char     content_body[VS_TEXT_LONG];
+  char     content_meta[VS_TEXT_SHORT];
+  char     status_title[VS_TEXT_SHORT];
+  char     status_value[VS_TEXT_LONG];
+  char     status_meta[VS_TEXT_SHORT];
+  char     softkey[VS_KEY_COUNT][VS_TEXT_SHORT];
+};
+
+/* Queue one input event as if the key task had produced it.  -ENODEV when
+ * the UI is not running, -EINVAL for an event it could not have produced.
+ */
+
+int vs_app_inject_input(const struct vs_input_event_s *event);
+
+/* Copy the UI's last published status.  -ENODEV when there is none. */
+
+int vs_app_get_status(struct vs_app_status_s *out);
 
 #endif

@@ -16,10 +16,14 @@
  * because the cloud client is compiled into this one, and a second PROGNAME
  * would mean a second link of the same objects.
  *
+ * Every other subcommand operates the UI that is already running, through
+ * the same gestures the keys produce; vs_cli.c has the list.
+ *
  * SPDX-License-Identifier: Apache-2.0
  ****************************************************************************/
 #include <nuttx/config.h>
 
+#include <ctype.h>
 #include <errno.h>
 #include <sched.h>
 #include <stdio.h>
@@ -29,6 +33,7 @@
 #include <unistd.h>
 
 #include "include/vs_app.h"
+#include "include/vs_cli.h"
 #include "include/vs_cloud.h"
 #include "include/vs_history.h"
 #include "include/vs_social.h"
@@ -354,7 +359,16 @@ int main(int argc, FAR char *argv[])
    * poll rounds, which is what makes the emotion path observable at all.
    */
 
-  if (argc > 1 && strcmp(argv[1], "social") == 0)
+  /* Only while no UI is running, though.  This drives vs_social itself and
+   * drains the UI's event queue for its own use, so beside a running UI the
+   * two take each other's events, and the vs_tts_close() at its end leaves
+   * that UI with no player until a reboot.  With a UI up, the same command
+   * runs a session through the UI instead; see vs_cli.c.
+   */
+
+  if (argc > 1 && strcmp(argv[1], "social") == 0 &&
+      (argc == 2 || isdigit((unsigned char)argv[2][0])) &&
+      !vs_cli_ui_ready())
     {
       unsigned int seconds = 15;
 
@@ -374,13 +388,11 @@ int main(int argc, FAR char *argv[])
       return velasight_social_probe(seconds);
     }
 
+  /* Everything else operates the running UI, the way the keys would. */
+
   if (argc > 1)
     {
-      printf("Usage: velasight [cloudprobe | social [seconds]]\n"
-             "  (no argument)      run the product UI on both displays\n"
-             "  cloudprobe         one cloud round trip, synthetic payload\n"
-             "  social [seconds]   one real session, camera and microphone\n");
-      return 1;
+      return vs_cli_main(argc, argv);
     }
 
   printf("velasight: taking ownership of both displays\n");

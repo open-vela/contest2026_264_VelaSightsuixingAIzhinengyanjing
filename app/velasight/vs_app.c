@@ -19,11 +19,13 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <arch/board/board.h>
+#include <arch/chip/bk7258_psram.h>
 
 #include <agent_config.h>
 
@@ -206,6 +208,16 @@ static struct
 
 static struct vs_network_s *g_network_result;
 static uint32_t g_active_request_id;
+
+/* The status vs_app_get_status() hands out, published by vs_render() under
+ * g_app_events.lock.  Allocated by vs_app_run() rather than declared, from
+ * PSRAM where it can be: this program's static data comes out of the boot
+ * heap, which bring-up needs before PSRAM exists (see social_state_s).  Also
+ * what says a UI is running, so a second vs_app_run() can refuse.
+ */
+
+static struct vs_app_status_s *g_app_status;
+static bool g_app_status_psram;
 
 static struct
 {
@@ -481,6 +493,12 @@ struct vs_runtime_s
   char advice_text[VS_TEXT_LONG];
   uint32_t advice_until_ms;
   char result_text[VS_TEXT_LONG];
+
+  /* Input events handled so far, published with the status so a command
+   * that injected some can tell when the UI has acted on them.
+   */
+
+  uint32_t inputs_handled;
 };
 
 struct vs_network_worker_s
@@ -552,6 +570,80 @@ int vs_app_take_event(struct vs_app_event_s *out)
     }
 
   return vs_app_pop_event(out) ? 0 : -EAGAIN;
+}
+
+/* Withdraw the status when the UI stops, so the commands see it gone. */
+
+static void vs_app_release_status(void)
+{
+  struct vs_app_status_s *status;
+  bool psram;
+
+  pthread_mutex_lock(&g_app_events.lock);
+  status = g_app_status;
+  psram  = g_app_status_psram;
+  g_app_status = NULL;
+  pthread_mutex_unlock(&g_app_events.lock);
+
+  if (status == NULL)
+    {
+      return;
+    }
+
+  if (psram)
+    {
+      bk7258_psram_free(status);
+    }
+  else
+    {
+      free(status);
+    }
+}
+
+int vs_app_inject_input(const struct vs_input_event_s *event)
+{
+  bool ready;
+
+  if (event == NULL || event->type <= VS_INPUT_PRESS ||
+      event->type > VS_INPUT_NET_TOGGLE || event->key >= VS_KEY_COUNT ||
+      event->progress > 100)
+    {
+      return -EINVAL;
+    }
+
+  pthread_mutex_lock(&g_app_events.lock);
+  ready = g_app_status != NULL && g_app_status->ready;
+  pthread_mutex_unlock(&g_app_events.lock);
+
+  if (!ready)
+    {
+      return -ENODEV;
+    }
+
+  /* The same queue, and so the same handling, as a key on the board. */
+
+  vs_input_queue_push(event);
+  return 0;
+}
+
+int vs_app_get_status(struct vs_app_status_s *out)
+{
+  int ret = -ENODEV;
+
+  if (out == NULL)
+    {
+      return -EINVAL;
+    }
+
+  pthread_mutex_lock(&g_app_events.lock);
+  if (g_app_status != NULL)
+    {
+      *out = *g_app_status;
+      ret = 0;
+    }
+
+  pthread_mutex_unlock(&g_app_events.lock);
+  return ret;
 }
 
 static struct vs_network_s *vs_take_network_result(void)
@@ -1648,6 +1740,76 @@ static void vs_snapshot(struct vs_runtime_s *runtime,
     }
 }
 
+/* Publish what vs_app_get_status() returns.  From vs_render(), because every
+ * state change already ends in one, and with the snapshot that render drew so
+ * the texts are exactly the ones on the glass.
+ */
+
+static void vs_publish_status(const struct vs_runtime_s *runtime,
+                              const struct vs_ui_snapshot_s *snapshot)
+{
+  struct vs_app_status_s *status;
+  int key;
+
+  pthread_mutex_lock(&g_app_events.lock);
+  status = g_app_status;
+  if (status == NULL)
+    {
+      pthread_mutex_unlock(&g_app_events.lock);
+      return;
+    }
+
+  status->seq++;
+  status->inputs          = runtime->inputs_handled;
+  status->page            = runtime->page;
+  status->request_id      = runtime->active_request_id;
+  status->social_stage    = runtime->social_stage;
+  status->error           = runtime->error;
+  status->error_retryable = runtime->error_retryable;
+  status->error_retry     = (uint8_t)runtime->error_retry;
+  status->network_busy    = runtime->network_busy;
+  status->voice_arming    = runtime->voice_arming;
+  status->voice_ending    = runtime->voice_ending;
+  status->photo_context   = runtime->photo_context;
+  status->api_ready       = runtime->api_ready;
+  status->history_blank   = runtime->history_blank;
+  status->volume_editing  = runtime->volume_editing;
+  status->alert_active    = runtime->alert_active;
+  status->volume          = runtime->volume_level;
+  status->history_index   = snapshot->history_index;
+  status->history_count   = snapshot->history_count;
+  status->emotion         = runtime->emotion;
+  status->net_mode        = runtime->network.mode;
+  status->net_state       = runtime->network.state;
+  snprintf(status->net_ssid, sizeof(status->net_ssid), "%s",
+           runtime->network.ssid);
+  snprintf(status->net_address, sizeof(status->net_address), "%s",
+           runtime->network.address);
+  snprintf(status->error_reason, sizeof(status->error_reason), "%s",
+           runtime->error_reason);
+  snprintf(status->content_title, sizeof(status->content_title), "%s",
+           snapshot->content_title);
+  snprintf(status->content_body, sizeof(status->content_body), "%s",
+           snapshot->content_body);
+  snprintf(status->content_meta, sizeof(status->content_meta), "%s",
+           snapshot->content_meta);
+  snprintf(status->status_title, sizeof(status->status_title), "%s",
+           snapshot->status_title);
+  snprintf(status->status_value, sizeof(status->status_value), "%s",
+           snapshot->status_value);
+  snprintf(status->status_meta, sizeof(status->status_meta), "%s",
+           snapshot->status_meta);
+
+  for (key = 0; key < VS_KEY_COUNT; key++)
+    {
+      snprintf(status->softkey[key], sizeof(status->softkey[key]), "%s",
+               snapshot->softkey[key].visible ?
+               snapshot->softkey[key].text : "");
+    }
+
+  pthread_mutex_unlock(&g_app_events.lock);
+}
+
 static void vs_render(struct vs_display_s *display,
                       struct vs_runtime_s *runtime)
 {
@@ -1655,6 +1817,7 @@ static void vs_render(struct vs_display_s *display,
 
   vs_snapshot(runtime, &snapshot);
   (void)vs_display_render(display, &snapshot);
+  vs_publish_status(runtime, &snapshot);
   if (runtime->response_pending_visible)
     {
       runtime->response_until_ms = vs_app_now_ms() + VS_RESPONSE_VISIBLE_MS;
@@ -3408,9 +3571,50 @@ int vs_app_run(void)
   runtime.network.mode = VS_NET_STA;
   runtime.network.state = VS_NET_DOWN;
 
+  /* One UI per board.  A second one -- "velasight" typed at nsh while the
+   * autostarted one runs -- would reopen both panels and start a second key
+   * task over the first one's queue.
+   */
+
+  {
+    struct vs_app_status_s *status;
+    bool psram = true;
+
+    status = bk7258_psram_malloc(sizeof(*status));
+    if (status == NULL)
+      {
+        psram  = false;
+        status = malloc(sizeof(*status));
+      }
+
+    if (status == NULL)
+      return -ENOMEM;
+
+    memset(status, 0, sizeof(*status));
+    pthread_mutex_lock(&g_app_events.lock);
+    if (g_app_status != NULL)
+      {
+        pthread_mutex_unlock(&g_app_events.lock);
+        if (psram)
+          bk7258_psram_free(status);
+        else
+          free(status);
+
+        printf("velasight: the UI is already running\n");
+        return -EBUSY;
+      }
+
+    g_app_status       = status;
+    g_app_status_psram = psram;
+    pthread_mutex_unlock(&g_app_events.lock);
+  }
+
   ret = vs_display_open(&display);
   if (ret < 0)
-    return ret;
+    {
+      vs_app_release_status();
+      return ret;
+    }
   vs_render(display, &runtime);
   ret = vs_input_open(&input);
   if (ret < 0)
@@ -3534,6 +3738,12 @@ int vs_app_run(void)
       vs_voice_open();
     }
 
+  /* From here every queued input is handled, so the commands may inject. */
+
+  pthread_mutex_lock(&g_app_events.lock);
+  g_app_status->ready = true;
+  pthread_mutex_unlock(&g_app_events.lock);
+
   vs_render(display, &runtime);
   for (;;)
     {
@@ -3624,6 +3834,7 @@ int vs_app_run(void)
                vs_input_queue_pop(&event))
           {
             vs_handle_event(display, &runtime, network, &event);
+            runtime.inputs_handled++;
             input_count++;
           }
 
@@ -3738,5 +3949,6 @@ fail:
   vs_history_close();
   vs_input_close(input);
   vs_display_close(display);
+  vs_app_release_status();
   return ret;
 }
