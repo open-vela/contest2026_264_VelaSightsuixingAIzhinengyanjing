@@ -780,12 +780,25 @@ config VS_SOCIAL_CLOUD_DNS
 
 config VS_SOCIAL_IMAGE_INTERVAL_MS
 	int "VelaSight social image sampling interval (ms)"
-	default 500
+	default 1000
 	range 200 2000
 	depends on LVX_USE_DEMO_CONTEST2026_264_VELASIGHT
 	---help---
 		Target gap between captured frames.  The cloud interface document
 		asks for 200 ms.
+
+		1000, down from 500, because 500 was a rate this session never
+		delivered and the attempt was what made it unstable.  Measured
+		2026-09-08 (vs-264-5129d290): 221 images in 297 s, 0.74 a
+		second, with the sampler spending the session between 1000 and
+		2000 ms -- twelve rate changes and six dropped frames, each
+		overflow a moment when both workers were busy and the
+		registrations queued behind them.  Each image is a registration
+		plus a transfer that averaged 1124 ms, the two workers also carry
+		an audio chunk every two seconds, and the cloud starts fetching
+		an image the moment it is registered.  One a second is what that
+		pipeline carries with room to spare, so the uplink runs below its
+		ceiling instead of on it.
 
 		What limits this is no longer the camera.  Earlier values here
 		were sized against "252 ms per delivered frame", read from
@@ -819,11 +832,6 @@ config VS_SOCIAL_IMAGE_INTERVAL_MS
 		validation on frames this application never reads -- see that
 		option's help text.
 
-		Keep this equal to 1000 / VS_SOCIAL_CAPTURE_FPS.  The two knobs
-		gate different stages and a mismatch spends whole frames of
-		validation on frames this application never reads -- see that
-		option's help text.
-
 		The numbers to watch are the "sampled N frames" line at the end
 		of a session against the session's duration, and hw_busy against
 		sampler_skipped in the driver's stop_capture line.  hw_busy above
@@ -833,7 +841,7 @@ config VS_SOCIAL_IMAGE_INTERVAL_MS
 
 config VS_SOCIAL_CAPTURE_FPS
 	int "VelaSight social camera delivery rate (fps)"
-	default 2
+	default 1
 	range 1 30
 	depends on LVX_USE_DEMO_CONTEST2026_264_VELASIGHT
 	---help---
@@ -860,15 +868,18 @@ config VS_SOCIAL_CAPTURE_FPS
 		2.94 read, about 40% of the driver's validation work was spent on
 		images nobody read.
 
-		Two.  The cost of a delivered frame is now 1-4 ms of entropy
-		validation (CONFIG_BK7258_CAMERA_JPEG_VALIDATE_MCUS settles bit
-		alignment on a 128-macroblock prefix instead of the whole scan),
-		so the camera is no longer what sets this.  The upload path is:
-		two cloud round trips per image at about 135 ms each, which is
-		roughly 540 ms per second of session at 2 fps.  Earlier defaults
-		of 1 and 2 were chosen against a "252 ms per frame" figure that
-		turned out to be wall time including preemption rather than cost
-		-- see VS_SOCIAL_IMAGE_INTERVAL_MS for what replaced it.
+		One, matching the 1000 ms VS_SOCIAL_IMAGE_INTERVAL_MS.  The cost
+		of a delivered frame is now 1-4 ms of entropy validation
+		(CONFIG_BK7258_CAMERA_JPEG_VALIDATE_MCUS settles bit alignment on
+		a 128-macroblock prefix instead of the whole scan), so the camera
+		is no longer what sets this; the upload path is, and it carries
+		about one image a second -- see VS_SOCIAL_IMAGE_INTERVAL_MS.
+
+		Freshness does not suffer for it.  vs_media.c leaves the capture
+		queue in NuttX's default V4L2_BUF_MODE_RING, where a full queue
+		overwrites its oldest frame, so a grab returns the most recently
+		completed one: at most one delivery period old, which is small
+		against the seconds a result takes to come back.
 
 		Overshooting is wasteful rather than dangerous.  This work runs
 		at BK7258_CAMERA_JPEG_PRIORITY and the cloud workers at
@@ -1599,6 +1610,94 @@ config VS_SOCIAL_IMAGE_INTERVAL_MAX_MS
 		lost outright; lowering it toward
 		CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS disables the adaptation.
 
+config VS_SOCIAL_IMAGE_MAX_AGE_MS
+	int "VelaSight social oldest frame still worth uploading (ms)"
+	default 2500
+	range 0 10000
+	depends on LVX_USE_DEMO_CONTEST2026_264_VELASIGHT
+	---help---
+		A queued frame older than this is discarded unsent when a newer
+		one is waiting behind it.  0 disables the check.
+
+		The ring only drops when it is full, and four slots of a slow
+		link is a lot of time.  Measured on the AI side 2026-09-08: in a
+		session whose transfers averaged 2.5 s (vs-264-4433fb25) frames
+		reached registration 7.3 s after capture at p90, and in every
+		session 91-100% of frames were fetched by the cloud before their
+		transfer had finished.  A stale frame costs a full upload and a
+		classification of a moment that has passed, and it holds the
+		worker the fresh frame behind it is waiting for.
+
+		The newest frame is always kept, so a link that is slow across
+		the board still delivers its freshest picture.  A discard also
+		backs the sampler off exactly as an overflow does: dropping
+		stale frames keeps the ring from ever filling, and the overflow
+		would otherwise be the only congestion signal the sampler gets.
+
+		2500 is about two transfers at the measured mean, well clear of
+		the sub-second wait a healthy session sees.
+
+config VS_SOCIAL_ALERT_IMAGE_INTERVAL_MS
+	int "VelaSight social image sampling interval while an alert stands (ms)"
+	default 3000
+	range 0 10000
+	depends on LVX_USE_DEMO_CONTEST2026_264_VELASIGHT
+	---help---
+		How far apart frames are taken while an extreme-emotion alert is
+		on screen.  0 leaves the sampler alone.  Audio is not affected.
+
+		This is load control for the cloud, not for the link.  The cloud
+		queues an advice job for every extreme frame it classifies, and
+		re-dispatches an extreme frame up to three more times 3.5-5 s
+		later, each copy classified and queued again.  Measured on the AI
+		side 2026-09-08: 85 extreme frames became 303 advice jobs in a
+		five-minute session (vs-264-a931b4b9), the queue grew to 119 jobs
+		and 115 were never produced; in vs-264-c01a7208 the delay from an
+		extreme frame to its advice rose from 10.8 s to 50.5 s within
+		forty seconds.  Frames taken during an alert are nearly all
+		extreme frames, so they are what feeds that queue, and every
+		second they add is a second of delay on the advice the alert is
+		waiting for.
+
+		They add little to the result.  The advice is generated from the
+		audio around the moment, which keeps its normal rate, and the
+		cloud's rule is one extreme reading in a ten-second window, which
+		a frame every three seconds still satisfies three times over.
+		The emotion timeline is sparser for the length of the alert and
+		nowhere else.
+
+		Applied as a lower bound on the interval, so a sampler already
+		backed off further for the link keeps its slower rate.
+
+config VS_SOCIAL_RESULT_BACKLOG_MAX
+	int "VelaSight social frames awaiting a result before sampling slows"
+	default 6
+	range 0 24
+	depends on LVX_USE_DEMO_CONTEST2026_264_VELASIGHT
+	---help---
+		How many uploaded frames may be waiting for their emotion result
+		before the sampler drops to CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MAX_MS
+		until the cloud catches up.  0 disables the check.
+
+		The sampler's own backoff only sees the uplink: it acts when the
+		local ring overflows.  A cloud that accepts uploads promptly but
+		answers them slowly never overflows that ring, so without this the
+		device keeps feeding it at full rate and each result arrives later
+		than the one before -- the latency that grows with the length of a
+		session.  Bounding what is outstanding is the end-to-end form of
+		the same rule, the one TCP's window applies to unacknowledged
+		data.
+
+		Only frames uploaded within the last fifteen seconds count, so a
+		message the cloud never answers stops holding the sampler back
+		long before social_advice_sweep() retires it.
+
+		6 is about twice what a healthy session carries.  At one frame a
+		second a result normally reaches the device one to three seconds
+		after its transfer completes -- the cloud refetches every 0.8 s
+		until the object is there, and the poll runs every 1.5 s -- and a
+		poll that steps aside for registrations adds up to three more.
+
 config VS_SOCIAL_UPLOAD_BACKOFF_MIN_MS
 	int "VelaSight social upload backoff floor (ms)"
 	default 250
@@ -1708,9 +1807,15 @@ config VS_SOCIAL_INFLIGHT_MAX
 		message is no longer retired the moment its result arrives -- it is
 		held for the grace window in case the cloud attaches an advice to it
 		-- so the table now holds the messages still awaiting a result plus
-		roughly grace / VS_SOCIAL_IMAGE_INTERVAL_MS answered ones.  At the
-		defaults that is about sixteen answered entries alongside the
-		outstanding ones, which 16 could not carry.
+		roughly grace / VS_SOCIAL_IMAGE_INTERVAL_MS answered ones, about six
+		at the defaults, and the extreme ones waiting for their advice.
+
+		That arithmetic only holds because an answer now replaces the
+		registration deadline instead of extending it; see
+		social_inflight_answered().  Until it did, every answered entry kept
+		its sixty-second registration deadline, the table stayed full from
+		about half a minute into a session, and every getResult carried all
+		24 identifiers and got their results back again.
 
 		The range stops at VS_CLOUD_POLL_MAX_IDS, and that is a hard ceiling
 		rather than a preference.  One getResult carries at most that many

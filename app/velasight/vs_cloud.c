@@ -4252,6 +4252,72 @@ out:
   return ret;
 }
 
+/* How many of the most recent timeline timestamps a new entry is compared
+ * against when looking for a repeat.  See cloud_summarize_timeline().
+ */
+
+#define CLOUD_TIMELINE_DEDUP_SPAN 64
+
+/* An emotionTimeline entry's timestamp, the capture instant this device sent
+ * at registration.  Accepted as a string, which is what the cloud sends, or
+ * as a number.  0 when absent, which exempts the entry from deduplication.
+ */
+
+static uint64_t cloud_timeline_stamp(const cJSON *item)
+{
+  const cJSON *ts = cJSON_GetObjectItem((cJSON *)item, "timestamp");
+
+  if (ts == NULL)
+    {
+      return 0;
+    }
+
+  if (cJSON_IsString(ts) && ts->valuestring != NULL)
+    {
+      return (uint64_t)strtoull(ts->valuestring, NULL, 10);
+    }
+
+  if (cJSON_IsNumber(ts) && ts->valuedouble > 0)
+    {
+      return (uint64_t)ts->valuedouble;
+    }
+
+  return 0;
+}
+
+/* Whether stamp is one of the last CLOUD_TIMELINE_DEDUP_SPAN stamps recorded
+ * in seen, recording it when it is not.  A zero stamp is never a repeat and
+ * is not recorded, so an entry without one is always counted.
+ */
+
+static bool cloud_timeline_repeat(uint64_t *seen, unsigned int *count,
+                                  unsigned int *next, uint64_t stamp)
+{
+  unsigned int k;
+
+  if (stamp == 0)
+    {
+      return false;
+    }
+
+  for (k = 0; k < *count; k++)
+    {
+      if (seen[k] == stamp)
+        {
+          return true;
+        }
+    }
+
+  seen[*next] = stamp;
+  *next = (*next + 1) % CLOUD_TIMELINE_DEDUP_SPAN;
+  if (*count < CLOUD_TIMELINE_DEDUP_SPAN)
+    {
+      (*count)++;
+    }
+
+  return false;
+}
+
 /****************************************************************************
  * Name: cloud_summarize_timeline
  *
@@ -4265,6 +4331,16 @@ out:
  *
  *   tense takes the rounding remainder so the three always total 100.
  *
+ *   Each frame is counted once, by its timestamp.  The cloud re-dispatches a
+ *   frame it has not finished with -- an extreme one up to three more times,
+ *   3.5-5 s apart -- and appends a timeline entry every time it classifies
+ *   it.  Measured 2026-09-08 (vs-264-5129d290, record R0000032): 242 entries
+ *   for 221 frames, and the 16 red entries were four red frames four times
+ *   each, so the minutes reported 17 extreme samples and a tense share
+ *   inflated by the same copies.  The timeline is in processing order, not
+ *   capture order, and the copies sat at most 25 entries apart, so the last
+ *   CLOUD_TIMELINE_DEDUP_SPAN stamps are what a new entry is checked against.
+ *
  ****************************************************************************/
 
 static void cloud_summarize_timeline(cJSON *timeline,
@@ -4273,6 +4349,10 @@ static void cloud_summarize_timeline(cJSON *timeline,
   unsigned int counts[3] = { 0, 0, 0 }; /* calm, happy, tense */
   unsigned int reds = 0;                /* of those, the red ones */
   unsigned int total = 0;
+  uint64_t seen[CLOUD_TIMELINE_DEDUP_SPAN];
+  unsigned int seen_count = 0;
+  unsigned int seen_next = 0;
+  unsigned int repeats = 0;
   cJSON *item;
 
   minutes->calm = 0;
@@ -4296,6 +4376,13 @@ static void cloud_summarize_timeline(cJSON *timeline,
 
       if (!cJSON_IsObject(item))
         {
+          continue;
+        }
+
+      if (cloud_timeline_repeat(seen, &seen_count, &seen_next,
+                                cloud_timeline_stamp(item)))
+        {
+          repeats++;
           continue;
         }
 
@@ -4339,6 +4426,13 @@ static void cloud_summarize_timeline(cJSON *timeline,
         }
 
       total++;
+    }
+
+  if (repeats > 0)
+    {
+      printf("%s: emotionTimeline: %u repeated entr%s for an already "
+             "counted frame ignored\n", CLOUD_TAG, repeats,
+             repeats == 1 ? "y" : "ies");
     }
 
   minutes->emotion_samples = (uint16_t)(total > UINT16_MAX ? UINT16_MAX

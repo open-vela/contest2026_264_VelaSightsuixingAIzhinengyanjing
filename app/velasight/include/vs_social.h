@@ -211,4 +211,35 @@ bool vs_social_active(void);
 
 void vs_social_close(void);
 
+/****************************************************************************
+ * Session pacing, adjustable at run time.
+ *
+ * For measurement: the console sets these between sessions so the effect of
+ * an interval or a poll rate can be compared without a rebuild.  They start
+ * at the Kconfig values and are not persisted, so a reboot restores those.
+ * A session reads them as it runs, which is why they can only be changed
+ * while none is in flight.
+ ****************************************************************************/
+
+struct vs_social_tune_s
+{
+  uint32_t image_interval_ms;      /* the sampler's base interval */
+  uint32_t image_interval_max_ms;  /* backoff ceiling and backlog hold */
+  uint32_t backlog_max;            /* results awaited before holding, 0 off */
+  uint32_t capture_fps;            /* the camera's own frame rate */
+  uint32_t poll_interval_ms;       /* getResult cadence while sampling */
+};
+
+void vs_social_get_tune(struct vs_social_tune_s *out);
+
+/* -EBUSY while a session is in flight, -EINVAL for an out-of-range value;
+ * nothing is changed in either case.
+ */
+
+int vs_social_set_tune(const struct vs_social_tune_s *in);
+
+/* The Kconfig values, for resetting. */
+
+void vs_social_default_tune(struct vs_social_tune_s *out);
+
 #endif /* __APP_VELASIGHT_INCLUDE_VS_SOCIAL_H */

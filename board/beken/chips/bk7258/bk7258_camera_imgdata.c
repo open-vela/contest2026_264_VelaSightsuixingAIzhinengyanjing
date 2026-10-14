@@ -2221,7 +2221,20 @@ static int bk7258_camera_imgdata_set_buf(FAR struct imgdata_s *data,
       bk7258_yuv_buf_set_frame_buffer(phys);
     }
 
-  if (!up_interrupt_context())
+  /* Printed for the buffers queued before STREAMON and for the first re-arm
+   * after it, which is enough to show the geometry and that re-arming works.
+   * Not for every frame after that.
+   *
+   * The re-arm runs once per delivered frame, and the AP console is a mailbox
+   * channel: every line is a transaction holding the one in-flight slot that
+   * Wi-Fi frames also wait for.  A social session printed this line 275 times
+   * in 174 s (2026-09-08) while it was uploading, and camera validation runs
+   * have seen it cut into the middle of a structure line.  The count is still
+   * kept in set_buf_calls, which the uninit line reports.
+   */
+
+  if (!up_interrupt_context() &&
+      (!priv->capturing || priv->set_buf_live <= 1))
     {
       printf("bk7258_camera_imgdata: set_buf: addr=%p frame_bytes=%u "
              "(buffer size given=%u)\n",

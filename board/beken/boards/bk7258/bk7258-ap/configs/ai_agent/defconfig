@@ -60,6 +60,17 @@ CONFIG_BK7258_GC9D01_FB=y
 CONFIG_BK7258_MBOX_V2=y
 CONFIG_BK7258_JPEG_ENC=y
 CONFIG_BK7258_CAMERA_HW_JPEG=y
+# Social-session frames are most of what this device uploads, and the
+# transfer is the slow half of every upload: 1124 ms for a 16026-byte image
+# against 540 ms for a 5941-byte audio chunk on the same connection
+# (2026-09-08, vs-264-5129d290), and the cloud fetches each image as soon as
+# it is registered, so a frame whose transfer runs past ~1.7 s is lost.
+# Measured on board for the 480x480 band, steady state over 20 frames:
+# 16.45-17.08 KB at 100 and 11.80 KB at 65, every frame structurally valid
+# and the delivery rate unchanged.  The still-photo path keeps the first
+# frame after STREAMON, before rate control converges, and measured 24887 B
+# at 100 against 24403 B at 65, so it is essentially unaffected.
+CONFIG_BK7258_JPEG_BITRATE_PCT=65
 CONFIG_BK7258_MB_UART0_CONSOLE=y
 CONFIG_BK7258_MB_UART0_RXBUFSIZE=256
 CONFIG_BK7258_MB_UART0_SERIAL_RXBUFSIZE=256

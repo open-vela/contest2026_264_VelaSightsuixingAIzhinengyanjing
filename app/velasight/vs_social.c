@@ -28,12 +28,15 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
+#include <nuttx/compiler.h>
 
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +44,16 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <arch/chip/bk7258_netstats.h>
 #include <arch/chip/bk7258_psram.h>
+
+#ifdef CONFIG_MM_IOB
+#  include <nuttx/mm/iob.h>
+#endif
+
+#if defined(CONFIG_NET_STATISTICS) && defined(CONFIG_NET_TCP)
+#  include <nuttx/net/netstats.h>
+#endif
 
 #include <agent_config.h>
 
@@ -65,7 +77,7 @@
  */
 
 #ifndef CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS
-#  define CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS 340
+#  define CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS 1000
 #endif
 
 #ifndef CONFIG_VS_SOCIAL_IMAGE_WIDTH
@@ -77,7 +89,7 @@
 #endif
 
 #ifndef CONFIG_VS_SOCIAL_CAPTURE_FPS
-#  define CONFIG_VS_SOCIAL_CAPTURE_FPS 5
+#  define CONFIG_VS_SOCIAL_CAPTURE_FPS 1
 #endif
 
 #ifndef CONFIG_VS_SOCIAL_STACKSIZE_SESSION
@@ -225,6 +237,18 @@
 #  define CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MAX_MS 2000
 #endif
 
+#ifndef CONFIG_VS_SOCIAL_ALERT_IMAGE_INTERVAL_MS
+#  define CONFIG_VS_SOCIAL_ALERT_IMAGE_INTERVAL_MS 3000
+#endif
+
+#ifndef CONFIG_VS_SOCIAL_RESULT_BACKLOG_MAX
+#  define CONFIG_VS_SOCIAL_RESULT_BACKLOG_MAX 6
+#endif
+
+#ifndef CONFIG_VS_SOCIAL_IMAGE_MAX_AGE_MS
+#  define CONFIG_VS_SOCIAL_IMAGE_MAX_AGE_MS 2500
+#endif
+
 /* How the sampler moves between CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS and
  * CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MAX_MS.
  *
@@ -236,15 +260,74 @@
  * Recovery stops at social_state_s::image_floor_ms, the slowest rate observed
  * to overflow, and only that floor's own re-probe can go below it.  The two
  * streaks are what make the loop settle: approaching a known-good rate is
- * cheap, guessing that a known-bad one has become good is not.  4 against 16 is
- * the ratio, sized so a re-probe costs about twenty seconds at the measured
- * delivery rate rather than about five -- long enough that a session spends its
- * time at capacity instead of hunting for it.
+ * cheap, guessing that a known-bad one has become good is not.
+ *
+ * The re-probe streak was 16, which turned out to be hunting rather than
+ * holding.  Measured 2026-09-08 (vs-264-5129d290): three re-probes in under
+ * ninety seconds on a link that did not change, the one that reached 1000 ms
+ * overflowing eighteen seconds later -- twelve rate changes and six dropped
+ * frames in a four-minute session.  Each overflow is also a moment when every
+ * worker is busy and the registrations queue, which is the instability this
+ * loop exists to avoid.  48 is about a minute between re-probes at the
+ * delivered rate, so a session spends its time just below capacity and only
+ * occasionally tests whether the link has improved.
  */
 
 #define SOCIAL_IMAGE_RECOVER_STREAK 4
-#define SOCIAL_IMAGE_REPROBE_STREAK 16
+#define SOCIAL_IMAGE_REPROBE_STREAK 48
 #define SOCIAL_IMAGE_RECOVER_STEP_MS 250u
+
+/* How recent an unanswered upload has to be to count against
+ * CONFIG_VS_SOCIAL_RESULT_BACKLOG_MAX.
+ *
+ * The backlog check asks whether the cloud is keeping up now, so a message it
+ * will never answer must stop counting long before social_advice_sweep()
+ * retires it at CONFIG_VS_SOCIAL_ADVICE_TIMEOUT_MS -- otherwise a handful of
+ * lost results would hold the sampler down for a minute after the cloud had
+ * recovered.  Fifteen seconds is several times the healthy result latency and
+ * a quarter of that timeout.
+ */
+
+#define SOCIAL_BACKLOG_WINDOW_MS 15000u
+
+/* The longest single sleep the capture thread takes while waiting for its
+ * next frame.  Slicing the wait is what lets a pause, a finalize or a change
+ * of interval take effect promptly now that the interval can be several
+ * seconds long; see social_capture_worker().
+ */
+
+#define SOCIAL_CAPTURE_SLICE_MS 50u
+
+/* Performance accounting: one "vs_perf:" line per SOCIAL_PERF_REPORT_MS
+ * while a session runs, and one for the whole session when its uploads stop.
+ * social_perf_report() lists the fields.  Latencies are histograms of
+ * SOCIAL_PERF_BUCKET_MS buckets, which is the resolution their percentiles
+ * are reported at; the last bucket is open-ended and max is exact.
+ */
+
+#define SOCIAL_PERF_REPORT_MS 10000u
+#define SOCIAL_PERF_BUCKET_MS 250u
+#define SOCIAL_PERF_BUCKETS   64
+
+/* Board settings the cfg line records, 0 where a build has none. */
+
+#ifdef CONFIG_BK7258_JPEG_BITRATE_PCT
+#  define SOCIAL_PERF_JPEG_PCT CONFIG_BK7258_JPEG_BITRATE_PCT
+#else
+#  define SOCIAL_PERF_JPEG_PCT 0
+#endif
+
+#ifdef CONFIG_NET_SEND_BUFSIZE
+#  define SOCIAL_PERF_SNDBUF CONFIG_NET_SEND_BUFSIZE
+#else
+#  define SOCIAL_PERF_SNDBUF 0
+#endif
+
+#ifdef CONFIG_MM_IOB
+#  define SOCIAL_PERF_IOBS CONFIG_IOB_NBUFFERS
+#else
+#  define SOCIAL_PERF_IOBS 0
+#endif
 
 #ifndef CONFIG_VS_SOCIAL_INFLIGHT_MAX
 #  define CONFIG_VS_SOCIAL_INFLIGHT_MAX 24
@@ -315,6 +398,10 @@
  */
 
 #define SOCIAL_GAP_REPORT_MAX 5
+
+/* How many image refusals per session have their reason printed. */
+
+#define SOCIAL_REFUSAL_REPORT_MAX 3
 
 /* Upper bound on the JSON the end-of-session response can occupy, drawn from
  * the same budget vs_cloud.c parses it into.  The record is written straight
@@ -462,6 +549,12 @@ struct social_inflight_s
 
   uint64_t added_at_ms;
 
+  /* When the frame entered the ring, social_slot_s::stamp_ms, so the
+   * vs_perf line can report capture-to-result latency.
+   */
+
+  uint64_t captured_ms;
+
   /* When to give up, absolute and monotonic.
    *
    * One deadline rather than a rule applied at each site, because the reasons
@@ -483,6 +576,128 @@ struct social_poll_scratch_s
   const char *ids[VS_CLOUD_POLL_MAX_IDS];
   char id_store[VS_CLOUD_POLL_MAX_IDS][VS_CLOUD_MSG_ID_MAX];
   struct vs_social_event_s events[VS_CLOUD_POLL_MAX_IDS * 2];
+};
+
+/* Why the capture thread is sampling slower than the uplink would let it.
+ * Both holds answer to the cloud rather than to the link, which the sampler's
+ * own backoff in social_image_backoff() already follows.
+ */
+
+enum social_hold_e
+{
+  SOCIAL_HOLD_NONE = 0,
+  SOCIAL_HOLD_BACKLOG,  /* the cloud is behind on emotion results */
+  SOCIAL_HOLD_ALERT,    /* an extreme-emotion alert is standing */
+  SOCIAL_HOLD_KINDS     /* how many of the above, for arrays */
+};
+
+/* Count, sum and maximum of one duration, in milliseconds. */
+
+struct social_perf_stat_s
+{
+  uint32_t count;
+  uint32_t sum_ms;
+  uint32_t max_ms;
+};
+
+/* A duration's distribution as well, in SOCIAL_PERF_BUCKET_MS buckets, for
+ * the tail.  The last bucket is open-ended; stat.max_ms stays exact.
+ */
+
+struct social_perf_hist_s
+{
+  struct social_perf_stat_s stat;
+  uint16_t bucket[SOCIAL_PERF_BUCKETS];
+};
+
+/* What one vs_perf line covers.  Filled for the current window by the hooks,
+ * then folded into the session's total when the window is reported.
+ */
+
+struct social_perf_win_s
+{
+  uint32_t images;                  /* image uploads that succeeded */
+  uint32_t audios;                  /* audio uploads that succeeded */
+  uint32_t fails;                   /* uploads that did not */
+  uint64_t bytes;                   /* payload bytes actually sent */
+  struct social_perf_stat_s wait;   /* image: ring entry to upload start */
+  struct social_perf_stat_s reg;    /* registration, both media */
+  struct social_perf_stat_s put;    /* image transfer */
+  struct social_perf_stat_s aput;   /* audio transfer */
+  uint32_t answered;                /* first emotion result for an image */
+  uint32_t refused;                 /* first answer was status 30 */
+  struct social_perf_hist_s e2e;    /* frame captured to emotion result */
+  struct social_perf_hist_s cloud;  /* upload finished to emotion result */
+  struct social_perf_stat_s poll;   /* getResult round trips */
+  uint32_t poll_errors;
+  uint32_t poll_ids;                /* ids asked about, over all polls */
+  uint32_t hold_ms[SOCIAL_HOLD_KINDS];
+  int      iob_min;                 /* fewest free IOBs sampled */
+};
+
+/* The accounting for one session.  Allocated from PSRAM by
+ * social_perf_begin() and owned by the session thread, which is the only
+ * one that reports or frees it; the hooks on the other threads write win
+ * under g_social.lock.  Everything outside win is the session thread's.
+ */
+
+struct social_perf_s
+{
+  uint64_t began_ms;            /* session start, for t= */
+  uint64_t window_ms;           /* when the current window opened */
+  uint64_t hold_since_ms;       /* when hold was last charged */
+  enum social_hold_e hold;      /* the hold in force since then */
+
+  /* g_social's own counters as they stood when the window opened, so the
+   * window's share of each is a subtraction rather than a second counter.
+   */
+
+  uint32_t frames_at;
+  uint32_t dropped_at;
+  uint32_t stale_at;
+  uint32_t repeated_at;
+  uint32_t yielded_at;
+
+  /* The network counters the same way.  TCP's are 16 bits wide and wrap
+   * within a long session, so they are widened into totals per window.
+   */
+
+  struct bk7258_net_counters net_began;
+  struct bk7258_net_counters net_at;
+  uint16_t tcp_sent_at;
+  uint16_t tcp_rexmit_at;
+  uint32_t tcp_sent;
+  uint32_t tcp_rexmit;
+
+  struct social_perf_win_s win;
+  struct social_perf_win_s total;
+};
+
+/* What a vs_perf line prints besides its window's own figures: shares of
+ * g_social's counters and of the network's, and the state at print time.
+ */
+
+struct social_perf_view_s
+{
+  uint32_t t_s;
+  uint32_t span_ms;
+  uint32_t frames;
+  uint32_t dropped;
+  uint32_t stale;
+  uint32_t repeated;
+  uint32_t yielded;
+  uint32_t tcp_sent;
+  uint32_t tcp_rexmit;
+  uint32_t mb_timeout;
+  uint32_t mb_fifo_full;
+  uint32_t tx_full;
+  uint32_t rx_alloc;
+  uint32_t rx_qfull;
+  uint32_t interval;
+  uint8_t  q_audio;
+  uint8_t  q_image;
+  uint8_t  inflight;
+  uint8_t  outstanding;
 };
 
 struct social_state_s
@@ -535,6 +750,13 @@ struct social_state_s
   uint32_t audio_seq;
   uint32_t dropped_image;
   uint32_t dropped_audio;
+
+  /* Frames taken off the image ring unsent because they had waited longer
+   * than CONFIG_VS_SOCIAL_IMAGE_MAX_AGE_MS.  Counted apart from
+   * dropped_image, which is the ring overflowing; see social_queue_pop().
+   */
+
+  uint32_t dropped_stale;
   uint32_t uploaded;
   uint32_t upload_failed;
 
@@ -592,6 +814,14 @@ struct social_state_s
 
   uint32_t image_interval_ms;
   uint32_t image_ok_streak;
+
+  /* The pacing the sampler and the poll loop run to: the Kconfig values
+   * unless the console has changed them.  Only written by
+   * vs_social_set_tune(), which refuses while a session is in flight, so a
+   * running session reads it without the lock.
+   */
+
+  struct vs_social_tune_s tune;
 
   /* The slowest interval seen to overflow the queue, plus one recovery step:
    * the fastest rate recovery is allowed to reach on its own.  0 until the
@@ -927,6 +1157,13 @@ struct social_state_s
   struct social_poll_scratch_s *poll;
   bool poll_psram;
 
+  /* The vs_perf accounting, PSRAM only and NULL when that allocation
+   * failed: the lines are a measurement, so a session runs without them
+   * rather than taking SRAM heap for them.  See social_perf_begin().
+   */
+
+  struct social_perf_s *perf;
+
   pthread_t session_thread;
   pthread_t capture_thread;
   pthread_t audio_thread;
@@ -962,7 +1199,15 @@ struct social_state_s
 static struct social_state_s g_social =
 {
   .lock = PTHREAD_MUTEX_INITIALIZER,
-  .cond = PTHREAD_COND_INITIALIZER
+  .cond = PTHREAD_COND_INITIALIZER,
+  .tune =
+  {
+    .image_interval_ms     = CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS,
+    .image_interval_max_ms = CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MAX_MS,
+    .backlog_max           = CONFIG_VS_SOCIAL_RESULT_BACKLOG_MAX,
+    .capture_fps           = CONFIG_VS_SOCIAL_CAPTURE_FPS,
+    .poll_interval_ms      = CONFIG_VS_SOCIAL_POLL_INTERVAL_MS
+  }
 };
 
 /****************************************************************************
@@ -1396,6 +1641,80 @@ static void social_audio_push(unsigned char *data, size_t len,
 }
 
 /****************************************************************************
+ * Name: social_image_backoff
+ *
+ * Description:
+ *   Tell the sampler the uplink did not keep up with the current rate: reset
+ *   the recovery streak, remember the rate that failed and double the
+ *   interval, bounded by CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MAX_MS.  Called with
+ *   the lock held.
+ *
+ *   Two things find out, and both have to come through here.  A frame
+ *   evicted from a full ring is the obvious one.  A frame found too old to be
+ *   worth sending is the other -- see social_queue_pop() -- and it matters
+ *   that it backs off too: dropping stale frames keeps the ring from filling,
+ *   so without this the overflow signal would never fire, the uploader would
+ *   keep counting clean uploads, and recovery would walk the sampler up to
+ *   its fastest rate while the frames it produced were thrown away.
+ *
+ * Returned Value:
+ *   The new interval when it changed, 0 when the sampler was already at its
+ *   slowest.  Printed by the caller once the lock is released.
+ *
+ ****************************************************************************/
+
+static uint32_t social_image_backoff(void)
+{
+  uint32_t bound;
+
+  /* Reset the recovery streak: the run of clean uploads that would have
+   * earned a step back up has just been interrupted.
+   */
+
+  g_social.image_ok_streak = 0;
+
+  /* Remember the rate that could not be sustained, one step slower than
+   * the one that just failed.  This is what stops the recovery walking
+   * straight back into the same overflow, and it is the difference between
+   * a loop that converges and one that oscillates for the whole session.
+   *
+   * Measured 2026-09-07, without it: three full sawtooths in 79 s.  The
+   * interval doubled to 2000 ms on a drop, stepped 250 ms at a time back
+   * down to the configured 500 ms, overflowed again on arrival, and
+   * repeated.  Mean delivered rate 0.76 images/s against a 2 fps target,
+   * six frames lost, and the sampler spent most of the session in the slow
+   * half of its range because that is where a sawtooth spends its time.
+   * The link's actual capacity was about one image every 1250 ms
+   * throughout -- a figure the loop rediscovered and forgot three times.
+   *
+   * One step slower than the interval that failed, so the floor is a rate
+   * the link has not refused rather than the one it just did.  A plain
+   * assignment: the interval is never below the floor -- a re-probe lowers
+   * the floor first and lets the interval follow -- so this only ever
+   * ratchets upwards, which is what "worst seen" has to do.
+   */
+
+  bound = g_social.image_interval_ms + SOCIAL_IMAGE_RECOVER_STEP_MS;
+  g_social.image_floor_ms = bound > g_social.tune.image_interval_max_ms ?
+                            g_social.tune.image_interval_max_ms : bound;
+
+  if (g_social.image_interval_ms < g_social.tune.image_interval_max_ms)
+    {
+      uint32_t next = g_social.image_interval_ms * 2u;
+
+      if (next > g_social.tune.image_interval_max_ms)
+        {
+          next = g_social.tune.image_interval_max_ms;
+        }
+
+      g_social.image_interval_ms = next;
+      return next;
+    }
+
+  return 0;
+}
+
+/****************************************************************************
  * Name: social_image_push
  *
  * Description:
@@ -1442,56 +1761,8 @@ static void social_image_push(unsigned char *data, size_t len,
     {
       g_social.dropped_image++;
 
-      /* Back off, and reset the recovery streak: the run of clean uploads
-       * that would have earned a step back up has just been interrupted.
-       */
-
-      g_social.image_ok_streak = 0;
-
-      /* Remember the rate that could not be sustained, one step slower than
-       * the one that just failed.  This is what stops the recovery walking
-       * straight back into the same overflow, and it is the difference between
-       * a loop that converges and one that oscillates for the whole session.
-       *
-       * Measured 2026-09-07, without it: three full sawtooths in 79 s.  The
-       * interval doubled to 2000 ms on a drop, stepped 250 ms at a time back
-       * down to the configured 500 ms, overflowed again on arrival, and
-       * repeated.  Mean delivered rate 0.76 images/s against a 2 fps target,
-       * six frames lost, and the sampler spent most of the session in the slow
-       * half of its range because that is where a sawtooth spends its time.
-       * The link's actual capacity was about one image every 1250 ms
-       * throughout -- a figure the loop rediscovered and forgot three times.
-       */
-
-      /* One step slower than the interval that failed, so the floor is a rate
-       * the link has not refused rather than the one it just did.  A plain
-       * assignment: the interval is never below the floor -- a re-probe lowers
-       * the floor first and lets the interval follow -- so this only ever
-       * ratchets upwards, which is what "worst seen" has to do.
-       */
-
-      {
-        uint32_t bound = g_social.image_interval_ms +
-                         SOCIAL_IMAGE_RECOVER_STEP_MS;
-
-        g_social.image_floor_ms =
-          bound > CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MAX_MS ?
-          CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MAX_MS : bound;
-      }
-
-      if (g_social.image_interval_ms < CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MAX_MS)
-        {
-          uint32_t next = g_social.image_interval_ms * 2u;
-
-          if (next > CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MAX_MS)
-            {
-              next = CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MAX_MS;
-            }
-
-          g_social.image_interval_ms = next;
-          interval = next;
-          slowed = true;
-        }
+      interval = social_image_backoff();
+      slowed   = interval != 0;
 
       /* Rate limited by time rather than by count, which is what suits an
        * event this uneven.  A first drop after a quiet stretch prints at once
@@ -1557,6 +1828,13 @@ static void social_ring_take(struct social_ring_s *ring,
 
 static bool social_queue_pop(struct social_slot_s *out)
 {
+  struct social_slot_s stale[CONFIG_VS_SOCIAL_IMAGE_QUEUE_SLOTS];
+  uint32_t stale_total = 0;
+  uint32_t slowed = 0;
+  uint8_t nstale = 0;
+  uint8_t i;
+  bool report = false;
+
   pthread_mutex_lock(&g_social.lock);
 
   while (g_social.audio.count == 0 && g_social.image.count == 0)
@@ -1592,10 +1870,77 @@ static bool social_queue_pop(struct social_slot_s *out)
     }
   else
     {
+      /* Frames that have waited too long are not sent, as long as a newer one
+       * is queued behind them.
+       *
+       * The ring's drop-oldest policy only acts when it is full, and a full
+       * ring of four is not the same thing as a stale one: with the transfer
+       * at two seconds and more, frames reached registration seven seconds
+       * after the shutter (AI side, 2026-09-08, vs-264-4433fb25, p90 of
+       * capture to registration).  Such a frame costs a whole upload, is
+       * classified after the moment it shows has passed, and holds a worker
+       * the fresh frame behind it is waiting for.  The newest frame is always
+       * kept, so a link that is uniformly slow still delivers its freshest
+       * picture instead of nothing.
+       *
+       * A stale frame is the same signal as an overflow and backs the sampler
+       * off the same way; social_image_backoff() says why that is required
+       * rather than optional.
+       */
+
+      if (CONFIG_VS_SOCIAL_IMAGE_MAX_AGE_MS > 0)
+        {
+          uint64_t now = social_now_ms();
+
+          while (g_social.image.count > 1 &&
+                 now - g_social.image.slot[g_social.image.read].stamp_ms >
+                 (uint64_t)CONFIG_VS_SOCIAL_IMAGE_MAX_AGE_MS)
+            {
+              social_ring_take(&g_social.image, &stale[nstale++]);
+              g_social.dropped_stale++;
+            }
+
+          if (nstale > 0)
+            {
+              slowed      = social_image_backoff();
+              stale_total = g_social.dropped_stale;
+
+              if (g_social.drop_report_ms == 0 ||
+                  now - g_social.drop_report_ms >= SOCIAL_DROP_REPORT_MS)
+                {
+                  report = true;
+                  g_social.drop_report_ms = now;
+                }
+            }
+        }
+
       social_ring_take(&g_social.image, out);
     }
 
   pthread_mutex_unlock(&g_social.lock);
+
+  /* Freed and reported outside the lock, like the overflow path: the console
+   * is a mailbox channel that can block.
+   */
+
+  for (i = 0; i < nstale; i++)
+    {
+      social_free(stale[i].data, stale[i].from_psram);
+    }
+
+  if (report)
+    {
+      printf("%s: image older than %d ms not sent, %lu stale this session\n",
+             SOCIAL_TAG, CONFIG_VS_SOCIAL_IMAGE_MAX_AGE_MS,
+             (unsigned long)stale_total);
+    }
+
+  if (slowed != 0)
+    {
+      printf("%s: image sampling slowed to %lu ms (%.2f fps)\n", SOCIAL_TAG,
+             (unsigned long)slowed, 1000.0 / (double)slowed);
+    }
+
   return true;
 }
 
@@ -1659,9 +2004,10 @@ static bool social_inflight_waiting(const struct social_inflight_s *entry)
 /* True when this entry is answered and is only being kept on the chance that
  * the cloud attaches an advice to it.  Called with the lock held.
  *
- * These are the speculative ones, and telling them apart matters in exactly one
- * place: they are what eviction takes first among answered entries, because
- * they are the answered entries least likely to still produce anything.
+ * These are the speculative ones, and telling them apart matters in exactly
+ * one place: they are what eviction takes first among answered entries,
+ * because they are the answered entries least likely to still produce
+ * anything.
  */
 
 static bool social_inflight_grace(const struct social_inflight_s *entry)
@@ -1677,7 +2023,8 @@ static bool social_inflight_grace(const struct social_inflight_s *entry)
  * that happens to arrive with a shorter entitlement.
  */
 
-static void social_inflight_hold(struct social_inflight_s *entry, uint64_t now)
+static void social_inflight_hold(struct social_inflight_s *entry,
+                                 uint64_t now)
 {
   uint64_t want = now + (social_inflight_waiting(entry) ?
                          (uint64_t)CONFIG_VS_SOCIAL_ADVICE_TIMEOUT_MS :
@@ -1689,13 +2036,48 @@ static void social_inflight_hold(struct social_inflight_s *entry, uint64_t now)
     }
 }
 
+/* The first answer about this entry's image has arrived, an emotion or a
+ * failure.  Called with the lock held, and once per entry: both callers are
+ * guarded by image_seen, because getResult reports every id's current state
+ * on every poll and the same answer comes back each cycle.
+ *
+ * The deadline social_inflight_add() sets is a placeholder for "not answered
+ * yet", sized for a cloud that can take twelve seconds to reply.  It is not
+ * an entitlement to sixty seconds in the table, but routing the answer
+ * through social_inflight_hold() treated it as one: that function only
+ * extends, so every answered entry kept the placeholder and the grace window
+ * never ended anything early.  At one frame a second the table then sat full
+ * of answered entries, every getResult asked about all of them again, and the
+ * cloud sent each one back -- 45, 102 and 124 repeated results in three
+ * sessions measured 2026-09-08 -- while every new frame had to evict one of
+ * them to get in.
+ *
+ * So the answer replaces the placeholder.  An entry with a reason to expect
+ * advice still only moves forward, which keeps the promotion rule intact; one
+ * without gets exactly the grace window, counted from now.
+ */
+
+static void social_inflight_answered(struct social_inflight_s *entry,
+                                     uint64_t now)
+{
+  if (social_inflight_waiting(entry))
+    {
+      social_inflight_hold(entry, now);
+    }
+  else
+    {
+      entry->retire_at_ms = now + (uint64_t)CONFIG_VS_SOCIAL_ADVICE_GRACE_MS;
+    }
+}
+
 /* Drop one entry by index.  Called with the lock held. */
 
 static void social_inflight_remove(uint8_t index);
 
-/* Called with the lock held. */
+/* Called with the lock held.  captured_ms is the frame's ring stamp. */
 
-static void social_inflight_add(const char *msg_id, uint32_t alert_gen)
+static void social_inflight_add(const char *msg_id, uint32_t alert_gen,
+                                uint64_t captured_ms)
 {
   struct social_inflight_s *entry;
   uint64_t now = social_now_ms();
@@ -1718,10 +2100,10 @@ static void social_inflight_add(const char *msg_id, uint32_t alert_gen)
       bool sacrificed = true;
       uint8_t i;
 
-      /* Evicted by what the entry can still produce, worst first, and within a
-       * class by age -- the array is in arrival order, so the first match is
-       * the oldest of its kind.  Three passes rather than one comparison
-       * because the classes are not orderable by a single field.
+      /* Evicted by what the entry can still produce, worst first, and
+       * within a class by age -- the array is in arrival order, so the first
+       * match is the oldest of its kind.  Three passes rather than one
+       * comparison because the classes are not orderable by a single field.
        *
        *   past its deadline   nothing; it is about to be swept anyway
        *   grace only          a speculative wait for advice that may not come
@@ -1729,12 +2111,13 @@ static void social_inflight_add(const char *msg_id, uint32_t alert_gen)
        *                       it in the end-of-session timeline
        *   waiting for advice  the only output an extreme moment produces
        *
-       * This used to be an unconditional "drop index 0", justified in a comment
-       * that said it lost one frame's emotion result and nothing more.  Against
-       * this interface that was wrong: an advice is delivered under an image's
-       * msgId, so the entry waiting longest for its advice is exactly the entry
-       * a first-in-first-out eviction removes -- and once removed the id is no
-       * longer polled at all, so the advice is never even fetched.
+       * This used to be an unconditional "drop index 0", justified in a
+       * comment that said it lost one frame's emotion result and nothing
+       * more.  Against this interface that was wrong: an advice is delivered
+       * under an image's msgId, so the entry waiting longest for its advice
+       * is exactly the entry a first-in-first-out eviction removes -- and
+       * once removed the id is no longer polled at all, so the advice is
+       * never even fetched.
        */
 
       for (i = 0; i < g_social.inflight_count; i++)
@@ -1776,10 +2159,10 @@ static void social_inflight_add(const char *msg_id, uint32_t alert_gen)
 
       if (sacrificed)
         {
-          /* Every slot is waiting for advice, so one of them has to go.  Worth
-           * a line: it means the table is too small for the rate at which this
-           * conversation is producing extreme moments, and an advice is being
-           * abandoned rather than merely delayed.
+          /* Every slot is waiting for advice, so one of them has to go.
+           * Worth a line: it means the table is too small for the rate at
+           * which this conversation is producing extreme moments, and an
+           * advice is being abandoned rather than merely delayed.
            */
 
           printf("%s: inflight full of pending advice (%u slots), abandoning "
@@ -1798,12 +2181,16 @@ static void social_inflight_add(const char *msg_id, uint32_t alert_gen)
   snprintf(entry->msg_id, sizeof(entry->msg_id), "%s", msg_id);
   entry->alert_gen   = alert_gen;
   entry->added_at_ms = now;
+  entry->captured_ms = captured_ms;
 
-  /* The full timeout before any result has arrived, not the grace window.  The
-   * grace window is what an *answered* message gets; this one is still waiting
-   * to be answered, and an image result was measured arriving up to twelve
-   * seconds after its upload.  A deadline shorter than that would retire
-   * messages the cloud was still working on.
+  /* The full timeout before any result has arrived, not the grace window.
+   * The grace window is what an *answered* message gets; this one is still
+   * waiting to be answered, and an image result was measured arriving up to
+   * twelve seconds after its upload.  A deadline shorter than that would
+   * retire messages the cloud was still working on.
+   *
+   * A placeholder only: social_inflight_answered() replaces it when the
+   * answer comes, rather than extending it.
    */
 
   entry->retire_at_ms = now + (uint64_t)CONFIG_VS_SOCIAL_ADVICE_TIMEOUT_MS;
@@ -1829,19 +2216,773 @@ static void social_inflight_remove(uint8_t index)
 }
 
 /****************************************************************************
+ * Performance accounting
+ ****************************************************************************/
+
+/* Needed by the report, defined with the capture thread below. */
+
+static uint8_t social_results_outstanding(uint64_t now);
+
+/* Free IOBs right now, or -1 on a build without them. */
+
+static int social_perf_iob(void)
+{
+#ifdef CONFIG_MM_IOB
+  return iob_navail(false);
+#else
+  return -1;
+#endif
+}
+
+/* Read the network counters the report subtracts.  Left at zero where the
+ * build lacks them, which prints as zero rather than as noise.
+ */
+
+static void social_perf_net(struct bk7258_net_counters *net,
+                            uint16_t *tcp_sent, uint16_t *tcp_rexmit)
+{
+  memset(net, 0, sizeof(*net));
+  *tcp_sent   = 0;
+  *tcp_rexmit = 0;
+
+#ifdef CONFIG_BK7258_WIFI
+  bk7258_net_get_counters(net);
+#endif
+
+#if defined(CONFIG_NET_STATISTICS) && defined(CONFIG_NET_TCP)
+  *tcp_sent   = g_netstats.tcp.sent;
+  *tcp_rexmit = g_netstats.tcp.rexmit;
+#endif
+}
+
+static void social_perf_stat_add(struct social_perf_stat_s *stat,
+                                 uint64_t ms)
+{
+  uint32_t value = ms > UINT32_MAX ? UINT32_MAX : (uint32_t)ms;
+
+  stat->count++;
+  stat->sum_ms += value;
+  if (value > stat->max_ms)
+    {
+      stat->max_ms = value;
+    }
+}
+
+static void social_perf_stat_fold(struct social_perf_stat_s *to,
+                                  const struct social_perf_stat_s *from)
+{
+  to->count  += from->count;
+  to->sum_ms += from->sum_ms;
+  if (from->max_ms > to->max_ms)
+    {
+      to->max_ms = from->max_ms;
+    }
+}
+
+static uint32_t social_perf_avg(const struct social_perf_stat_s *stat)
+{
+  return stat->count > 0 ? stat->sum_ms / stat->count : 0;
+}
+
+static void social_perf_hist_add(struct social_perf_hist_s *hist,
+                                 uint64_t ms)
+{
+  uint64_t index = ms / SOCIAL_PERF_BUCKET_MS;
+
+  if (index >= SOCIAL_PERF_BUCKETS)
+    {
+      index = SOCIAL_PERF_BUCKETS - 1;
+    }
+
+  if (hist->bucket[index] < UINT16_MAX)
+    {
+      hist->bucket[index]++;
+    }
+
+  social_perf_stat_add(&hist->stat, ms);
+}
+
+static void social_perf_hist_fold(struct social_perf_hist_s *to,
+                                  const struct social_perf_hist_s *from)
+{
+  unsigned int i;
+
+  for (i = 0; i < SOCIAL_PERF_BUCKETS; i++)
+    {
+      uint32_t sum = (uint32_t)to->bucket[i] + from->bucket[i];
+
+      to->bucket[i] = sum > UINT16_MAX ? UINT16_MAX : (uint16_t)sum;
+    }
+
+  social_perf_stat_fold(&to->stat, &from->stat);
+}
+
+/* The pct-th percentile by nearest rank, as the upper edge of the bucket it
+ * falls in and never above the exact maximum.  0 with no samples.
+ */
+
+static uint32_t social_perf_pct(const struct social_perf_hist_s *hist,
+                                uint32_t pct)
+{
+  uint32_t need;
+  uint32_t seen = 0;
+  uint32_t edge;
+  unsigned int i;
+
+  if (hist->stat.count == 0)
+    {
+      return 0;
+    }
+
+  need = (hist->stat.count * pct + 99u) / 100u;
+  for (i = 0; i < SOCIAL_PERF_BUCKETS - 1; i++)
+    {
+      seen += hist->bucket[i];
+      if (seen >= need)
+        {
+          break;
+        }
+    }
+
+  edge = (uint32_t)(i + 1) * SOCIAL_PERF_BUCKET_MS;
+  return i < SOCIAL_PERF_BUCKETS - 1 && edge < hist->stat.max_ms ?
+         edge : hist->stat.max_ms;
+}
+
+static void social_perf_fold(struct social_perf_win_s *to,
+                             const struct social_perf_win_s *from)
+{
+  unsigned int i;
+
+  to->images      += from->images;
+  to->audios      += from->audios;
+  to->fails       += from->fails;
+  to->bytes       += from->bytes;
+  to->answered    += from->answered;
+  to->refused     += from->refused;
+  to->poll_errors += from->poll_errors;
+  to->poll_ids    += from->poll_ids;
+
+  social_perf_stat_fold(&to->wait, &from->wait);
+  social_perf_stat_fold(&to->reg, &from->reg);
+  social_perf_stat_fold(&to->put, &from->put);
+  social_perf_stat_fold(&to->aput, &from->aput);
+  social_perf_stat_fold(&to->poll, &from->poll);
+  social_perf_hist_fold(&to->e2e, &from->e2e);
+  social_perf_hist_fold(&to->cloud, &from->cloud);
+
+  for (i = 0; i < SOCIAL_HOLD_KINDS; i++)
+    {
+      to->hold_ms[i] += from->hold_ms[i];
+    }
+
+  if (from->iob_min < to->iob_min)
+    {
+      to->iob_min = from->iob_min;
+    }
+}
+
+/* Note the IOB pool's level.  Called with the lock held.
+ *
+ * Sampled, so a dip shorter than the gap between samples is missed; the
+ * capture thread samples every SOCIAL_CAPTURE_SLICE_MS while it waits, and
+ * the upload and poll hooks add one after each round trip.
+ */
+
+static void social_perf_note_iob(struct social_perf_s *perf)
+{
+  int avail = social_perf_iob();
+
+  if (avail < perf->win.iob_min)
+    {
+      perf->win.iob_min = avail;
+    }
+}
+
+/* Charge the time since the last charge to the hold that was in force.
+ * Called with the lock held.
+ */
+
+static void social_perf_charge(struct social_perf_s *perf, uint64_t now)
+{
+  if (now > perf->hold_since_ms)
+    {
+      perf->win.hold_ms[perf->hold] +=
+        (uint32_t)(now - perf->hold_since_ms);
+    }
+
+  perf->hold_since_ms = now;
+}
+
+/****************************************************************************
+ * Name: social_perf_begin
+ *
+ * Description:
+ *   Start the session's accounting and print its "vs_perf: cfg" line, so
+ *   every run's figures can be read against the settings that produced
+ *   them.  Runs on the session thread before any worker has been started.
+ *
+ ****************************************************************************/
+
+static void social_perf_begin(void)
+{
+  struct social_perf_s *perf;
+  uint64_t now;
+
+  perf = (struct social_perf_s *)bk7258_psram_malloc(sizeof(*perf));
+  if (perf == NULL)
+    {
+      printf("vs_perf: off, no PSRAM for %zu bytes\n", sizeof(*perf));
+      return;
+    }
+
+  memset(perf, 0, sizeof(*perf));
+  now = social_now_ms();
+  perf->began_ms      = now;
+  perf->window_ms     = now;
+  perf->hold_since_ms = now;
+  perf->hold          = SOCIAL_HOLD_NONE;
+  perf->win.iob_min   = social_perf_iob();
+  perf->total.iob_min = perf->win.iob_min;
+  social_perf_net(&perf->net_began, &perf->tcp_sent_at,
+                  &perf->tcp_rexmit_at);
+  perf->net_at = perf->net_began;
+
+  pthread_mutex_lock(&g_social.lock);
+  perf->frames_at   = g_social.image_seq;
+  perf->dropped_at  = g_social.dropped_image;
+  perf->stale_at    = g_social.dropped_stale;
+  perf->repeated_at = g_social.results_repeated;
+  perf->yielded_at  = g_social.poll_yielded;
+  g_social.perf     = perf;
+  pthread_mutex_unlock(&g_social.lock);
+
+  printf("vs_perf: cfg sid=%s iv=%d ivmax=%d fps=%d aiv=%d backlog=%d "
+         "age=%d grace=%d poll=%d chunk=%d abr=%d size=%dx%d wk=%d "
+         "islots=%d inf=%d jpeg=%d sndbuf=%d iob=%d\n",
+         g_social.session.session_id,
+         (int)g_social.tune.image_interval_ms,
+         (int)g_social.tune.image_interval_max_ms,
+         (int)g_social.tune.capture_fps,
+         CONFIG_VS_SOCIAL_ALERT_IMAGE_INTERVAL_MS,
+         (int)g_social.tune.backlog_max,
+         CONFIG_VS_SOCIAL_IMAGE_MAX_AGE_MS,
+         CONFIG_VS_SOCIAL_ADVICE_GRACE_MS,
+         (int)g_social.tune.poll_interval_ms,
+         CONFIG_VS_SOCIAL_AUDIO_CHUNK_MS,
+         CONFIG_VS_SOCIAL_AUDIO_BITRATE,
+         CONFIG_VS_SOCIAL_IMAGE_WIDTH,
+         CONFIG_VS_SOCIAL_IMAGE_HEIGHT,
+         CONFIG_VS_SOCIAL_UPLOAD_WORKERS,
+         CONFIG_VS_SOCIAL_IMAGE_QUEUE_SLOTS,
+         CONFIG_VS_SOCIAL_INFLIGHT_MAX,
+         SOCIAL_PERF_JPEG_PCT, SOCIAL_PERF_SNDBUF, SOCIAL_PERF_IOBS);
+}
+
+/* The hooks.  Each is a no-op without the accounting, and each is called
+ * with g_social.lock held except social_perf_poll(), which takes it.
+ */
+
+/* The capture thread's sample: the hold now in force, and the IOB level.
+ * Once per pass of its loop.
+ */
+
+static void social_perf_sample(enum social_hold_e hold, uint64_t now)
+{
+  struct social_perf_s *perf = g_social.perf;
+
+  if (perf == NULL)
+    {
+      return;
+    }
+
+  social_perf_charge(perf, now);
+  perf->hold = hold;
+  social_perf_note_iob(perf);
+}
+
+/* One upload that succeeded.  began_ms is when the worker started it. */
+
+static void social_perf_upload(const struct social_slot_s *slot,
+                               const struct vs_cloud_upload_s *result,
+                               uint64_t began_ms)
+{
+  struct social_perf_s *perf = g_social.perf;
+  struct social_perf_win_s *win;
+
+  if (perf == NULL)
+    {
+      return;
+    }
+
+  win = &perf->win;
+  social_perf_stat_add(&win->reg, result->register_ms);
+
+  if (slot->type == VS_CLOUD_MEDIA_IMAGE)
+    {
+      win->images++;
+      social_perf_stat_add(&win->wait, began_ms > slot->stamp_ms ?
+                                       began_ms - slot->stamp_ms : 0);
+    }
+  else
+    {
+      win->audios++;
+    }
+
+  /* Only a transfer that happened, as with the per-type totals. */
+
+  if (result->payload_sent)
+    {
+      win->bytes += slot->len;
+      social_perf_stat_add(slot->type == VS_CLOUD_MEDIA_IMAGE ?
+                           &win->put : &win->aput, result->transfer_ms);
+    }
+
+  social_perf_note_iob(perf);
+}
+
+/* One upload that failed, at either half. */
+
+static void social_perf_failed(void)
+{
+  if (g_social.perf != NULL)
+    {
+      g_social.perf->win.fails++;
+    }
+}
+
+/* The first answer for an image: an emotion result when ok, status 30
+ * otherwise.  Both are timed.  A refusal is still the cloud having fetched
+ * the frame and run it through its pipeline, so its delay is the same queue
+ * a result waits in -- and on a bench with no face in view it is the only
+ * answer there is, which left the latency fields empty when only results
+ * counted.
+ */
+
+static void social_perf_answer(const struct social_inflight_s *entry,
+                               uint64_t now, bool ok)
+{
+  struct social_perf_s *perf = g_social.perf;
+
+  if (perf == NULL)
+    {
+      return;
+    }
+
+  if (ok)
+    {
+      perf->win.answered++;
+    }
+  else
+    {
+      perf->win.refused++;
+    }
+
+  if (entry->captured_ms != 0 && now >= entry->captured_ms)
+    {
+      social_perf_hist_add(&perf->win.e2e, now - entry->captured_ms);
+    }
+
+  if (now >= entry->added_at_ms)
+    {
+      social_perf_hist_add(&perf->win.cloud, now - entry->added_at_ms);
+    }
+}
+
+/* One getResult round trip, asking about ids messages.  Takes the lock. */
+
+static void social_perf_poll(size_t ids, uint64_t ms, bool ok)
+{
+  pthread_mutex_lock(&g_social.lock);
+  if (g_social.perf != NULL)
+    {
+      struct social_perf_win_s *win = &g_social.perf->win;
+
+      social_perf_stat_add(&win->poll, ms);
+      win->poll_ids += (uint32_t)ids;
+      if (!ok)
+        {
+          win->poll_errors++;
+        }
+
+      social_perf_note_iob(g_social.perf);
+    }
+
+  pthread_mutex_unlock(&g_social.lock);
+}
+
+static void social_perf_net_delta(struct social_perf_view_s *view,
+                                  const struct bk7258_net_counters *now,
+                                  const struct bk7258_net_counters *was)
+{
+  view->mb_timeout   = now->mb_timeout - was->mb_timeout;
+  view->mb_fifo_full = now->mb_fifo_full - was->mb_fifo_full;
+  view->tx_full      = now->wifi_tx_slots_full - was->wifi_tx_slots_full;
+  view->rx_alloc     = now->wifi_rx_alloc_fail - was->wifi_rx_alloc_fail;
+  view->rx_qfull     = now->wifi_rx_queue_full - was->wifi_rx_queue_full;
+}
+
+/* Append to a line being built, truncating rather than overrunning. */
+
+static void social_perf_cat(char *line, size_t size, size_t *len,
+                            const char *format, ...) printf_like(4, 5);
+
+static void social_perf_cat(char *line, size_t size, size_t *len,
+                            const char *format, ...)
+{
+  va_list ap;
+  int n;
+
+  if (*len + 1 >= size)
+    {
+      return;
+    }
+
+  va_start(ap, format);
+  n = vsnprintf(line + *len, size - *len, format, ap);
+  va_end(ap);
+
+  if (n > 0)
+    {
+      *len = (size_t)n < size - *len ? *len + (size_t)n : size - 1;
+    }
+}
+
+/* Print one vs_perf line.  kind is "" for a window, "total " for the
+ * session.  Outside the lock: the console is a mailbox channel and can
+ * block.
+ */
+
+static void social_perf_print(const char *kind,
+                              const struct social_perf_win_s *win,
+                              const struct social_perf_view_s *view)
+{
+  char line[512];
+  size_t len = 0;
+  uint32_t span = view->span_ms > 0 ? view->span_ms : 1;
+  uint32_t kbps10 = (uint32_t)(win->bytes * 80u / span);
+  uint32_t ids10 = win->poll.count > 0 ?
+                   win->poll_ids * 10u / win->poll.count : 0;
+
+  line[0] = '\0';
+  social_perf_cat(line, sizeof(line), &len,
+                  "vs_perf: %st=%lu win=%lu up=%lu/%lu/%lu kbps=%lu.%lu",
+                  kind, (unsigned long)view->t_s,
+                  (unsigned long)view->span_ms,
+                  (unsigned long)win->images, (unsigned long)win->audios,
+                  (unsigned long)win->fails, (unsigned long)(kbps10 / 10),
+                  (unsigned long)(kbps10 % 10));
+
+  social_perf_cat(line, sizeof(line), &len,
+                  " qw=%lu/%lu reg=%lu/%lu put=%lu/%lu aput=%lu/%lu",
+                  (unsigned long)social_perf_avg(&win->wait),
+                  (unsigned long)win->wait.max_ms,
+                  (unsigned long)social_perf_avg(&win->reg),
+                  (unsigned long)win->reg.max_ms,
+                  (unsigned long)social_perf_avg(&win->put),
+                  (unsigned long)win->put.max_ms,
+                  (unsigned long)social_perf_avg(&win->aput),
+                  (unsigned long)win->aput.max_ms);
+
+  social_perf_cat(line, sizeof(line), &len,
+                  " lat=%lu/%lu/%lu cld=%lu/%lu res=%lu/%lu rep=%lu",
+                  (unsigned long)social_perf_avg(&win->e2e.stat),
+                  (unsigned long)social_perf_pct(&win->e2e, 90),
+                  (unsigned long)win->e2e.stat.max_ms,
+                  (unsigned long)social_perf_avg(&win->cloud.stat),
+                  (unsigned long)social_perf_pct(&win->cloud, 90),
+                  (unsigned long)win->answered,
+                  (unsigned long)win->refused,
+                  (unsigned long)view->repeated);
+
+  social_perf_cat(line, sizeof(line), &len,
+                  " poll=%lu/%lu ids=%lu.%lu pms=%lu/%lu yld=%lu",
+                  (unsigned long)win->poll.count,
+                  (unsigned long)win->poll_errors,
+                  (unsigned long)(ids10 / 10), (unsigned long)(ids10 % 10),
+                  (unsigned long)social_perf_avg(&win->poll),
+                  (unsigned long)win->poll.max_ms,
+                  (unsigned long)view->yielded);
+
+  social_perf_cat(line, sizeof(line), &len,
+                  " fr=%lu drop=%lu/%lu hold=%lu/%lu iv=%lu q=%u/%u"
+                  " inf=%u out=%u",
+                  (unsigned long)view->frames, (unsigned long)view->dropped,
+                  (unsigned long)view->stale,
+                  (unsigned long)win->hold_ms[SOCIAL_HOLD_ALERT],
+                  (unsigned long)win->hold_ms[SOCIAL_HOLD_BACKLOG],
+                  (unsigned long)view->interval, (unsigned)view->q_audio,
+                  (unsigned)view->q_image, (unsigned)view->inflight,
+                  (unsigned)view->outstanding);
+
+  social_perf_cat(line, sizeof(line), &len,
+                  " tcp=%lu/%lu mb=%lu/%lu txf=%lu rx=%lu/%lu iob=%d",
+                  (unsigned long)view->tcp_sent,
+                  (unsigned long)view->tcp_rexmit,
+                  (unsigned long)view->mb_timeout,
+                  (unsigned long)view->mb_fifo_full,
+                  (unsigned long)view->tx_full,
+                  (unsigned long)view->rx_alloc,
+                  (unsigned long)view->rx_qfull, win->iob_min);
+
+  printf("%s\n", line);
+}
+
+/****************************************************************************
+ * Name: social_perf_report
+ *
+ * Description:
+ *   Print the window that has just ended as one "vs_perf:" line, fold it
+ *   into the session's total and open the next.  With final, follow it
+ *   with "vs_perf: total", the same fields over the whole session.  Session
+ *   thread only.
+ *
+ *   key=value, so runs can be compared by a script rather than read.  Times
+ *   are ms, and a/b is avg/max, unless listed otherwise:
+ *
+ *     t      s since the session began     win   ms this line covers
+ *     up     uploads ok: image/audio/failed
+ *     kbps   payload kbit/s actually sent over win
+ *     qw     image wait in the ring before its upload began
+ *     reg    registration, both media      put   image transfer
+ *     aput   audio transfer
+ *     lat    frame captured to emotion result, avg/p90/max
+ *     cld    upload finished to emotion result, avg/p90
+ *     res    first answers: emotion results/status 30
+ *     rep    answers the cloud sent again
+ *     poll   getResult calls/failed        ids   ids per call
+ *     pms    getResult round trip          yld   polls yielded
+ *     fr     frames into the ring          drop  overflowed/stale
+ *     hold   ms sampling was held: alert/backlog
+ *     iv q   sampler interval, audio/image queued, both at print time
+ *     inf    inflight entries now          out   results awaited now
+ *     tcp    TCP segments sent/retransmitted on timeout
+ *     mb     mailbox timeouts/FIFO full    txf   Wi-Fi TX slots full
+ *     rx     Wi-Fi RX alloc failures/queue full
+ *     iob    fewest free IOBs sampled
+ *
+ *   p90 is at SOCIAL_PERF_BUCKET_MS resolution.
+ *
+ ****************************************************************************/
+
+static void social_perf_report(bool final)
+{
+  struct social_perf_win_s win;
+  struct social_perf_win_s total;
+  struct social_perf_view_s view;
+  struct social_perf_view_s whole;
+  struct bk7258_net_counters net;
+  struct social_perf_s *perf;
+  uint16_t sent;
+  uint16_t rexmit;
+  uint64_t now;
+
+  pthread_mutex_lock(&g_social.lock);
+  perf = g_social.perf;
+  if (perf == NULL)
+    {
+      pthread_mutex_unlock(&g_social.lock);
+      return;
+    }
+
+  now = social_now_ms();
+  social_perf_charge(perf, now);
+  social_perf_note_iob(perf);
+
+  memset(&view, 0, sizeof(view));
+  view.t_s         = (uint32_t)((now - perf->began_ms) / 1000u);
+  view.span_ms     = (uint32_t)(now - perf->window_ms);
+  view.frames      = g_social.image_seq - perf->frames_at;
+  view.dropped     = g_social.dropped_image - perf->dropped_at;
+  view.stale       = g_social.dropped_stale - perf->stale_at;
+  view.repeated    = g_social.results_repeated - perf->repeated_at;
+  view.yielded     = g_social.poll_yielded - perf->yielded_at;
+  view.interval    = g_social.image_interval_ms;
+  view.q_audio     = g_social.audio.count;
+  view.q_image     = g_social.image.count;
+  view.inflight    = g_social.inflight_count;
+  view.outstanding = social_results_outstanding(now);
+
+  /* The session's figures are g_social's own, which vs_social_start()
+   * zeroed and social_perf_begin() found still zero.
+   */
+
+  whole          = view;
+  whole.span_ms  = (uint32_t)(now - perf->began_ms);
+  whole.frames   = g_social.image_seq;
+  whole.dropped  = g_social.dropped_image;
+  whole.stale    = g_social.dropped_stale;
+  whole.repeated = g_social.results_repeated;
+  whole.yielded  = g_social.poll_yielded;
+
+  perf->frames_at   = g_social.image_seq;
+  perf->dropped_at  = g_social.dropped_image;
+  perf->stale_at    = g_social.dropped_stale;
+  perf->repeated_at = g_social.results_repeated;
+  perf->yielded_at  = g_social.poll_yielded;
+  perf->window_ms   = now;
+
+  win = perf->win;
+  memset(&perf->win, 0, sizeof(perf->win));
+  perf->win.iob_min = social_perf_iob();
+  social_perf_fold(&perf->total, &win);
+  total = perf->total;
+  pthread_mutex_unlock(&g_social.lock);
+
+  /* The network side needs no lock: only this thread reads these fields,
+   * and the counters themselves are the drivers'.  The 16-bit subtraction
+   * is what survives a TCP counter wrapping within the window.
+   */
+
+  social_perf_net(&net, &sent, &rexmit);
+
+  view.tcp_sent   = (uint16_t)(sent - perf->tcp_sent_at);
+  view.tcp_rexmit = (uint16_t)(rexmit - perf->tcp_rexmit_at);
+  perf->tcp_sent_at   = sent;
+  perf->tcp_rexmit_at = rexmit;
+  perf->tcp_sent     += view.tcp_sent;
+  perf->tcp_rexmit   += view.tcp_rexmit;
+  social_perf_net_delta(&view, &net, &perf->net_at);
+  perf->net_at = net;
+
+  whole.tcp_sent   = perf->tcp_sent;
+  whole.tcp_rexmit = perf->tcp_rexmit;
+  social_perf_net_delta(&whole, &net, &perf->net_began);
+
+  social_perf_print("", &win, &view);
+  if (final)
+    {
+      social_perf_print("total ", &total, &whole);
+    }
+}
+
+/* Report the window once it has run SOCIAL_PERF_REPORT_MS.  Session thread
+ * only, which is also the only writer of the two fields read here, so they
+ * are read without the lock.
+ */
+
+static void social_perf_tick(void)
+{
+  struct social_perf_s *perf = g_social.perf;
+
+  if (perf != NULL &&
+      social_now_ms() - perf->window_ms >= SOCIAL_PERF_REPORT_MS)
+    {
+      social_perf_report(false);
+    }
+}
+
+/****************************************************************************
  * The capture thread
  ****************************************************************************/
 
+/* Uploaded frames still waiting for their emotion result, counting only those
+ * uploaded within SOCIAL_BACKLOG_WINDOW_MS.  Called with the lock held.
+ */
+
+static uint8_t social_results_outstanding(uint64_t now)
+{
+  uint8_t count = 0;
+  uint8_t i;
+
+  if (g_social.inflight == NULL)
+    {
+      return 0;
+    }
+
+  for (i = 0; i < g_social.inflight_count; i++)
+    {
+      const struct social_inflight_s *entry = &g_social.inflight[i];
+
+      if (!entry->image_seen &&
+          now - entry->added_at_ms < SOCIAL_BACKLOG_WINDOW_MS)
+        {
+          count++;
+        }
+    }
+
+  return count;
+}
+
+/****************************************************************************
+ * Name: social_capture_interval
+ *
+ * Description:
+ *   The gap to leave before the next frame: the sampler's own interval,
+ *   stretched while the cloud is behind on results or an alert stands.
+ *   Called with the lock held.
+ *
+ *   Both stretches are lower bounds, never shortenings, so a sampler that the
+ *   uplink has already backed off further keeps its slower rate.  When both
+ *   apply the longer one wins and is the one reported.
+ *
+ *   The backlog hold is end-to-end flow control.  The sampler's backoff only
+ *   sees the uplink -- it acts when the local ring overflows -- and a cloud
+ *   that takes uploads promptly but answers them slowly never overflows it,
+ *   so the device would keep feeding a queue that grows with every frame.
+ *   See CONFIG_VS_SOCIAL_RESULT_BACKLOG_MAX.
+ *
+ *   The alert hold is load control for the cloud's advice queue, which every
+ *   extreme frame adds to.  See CONFIG_VS_SOCIAL_ALERT_IMAGE_INTERVAL_MS for
+ *   the measurement.
+ *
+ * Input Parameters:
+ *   now         - monotonic milliseconds, for the backlog window
+ *   hold        - receives which hold, if any, decided the result
+ *   outstanding - receives the backlog count, for the log line
+ *
+ ****************************************************************************/
+
+static uint32_t social_capture_interval(uint64_t now,
+                                        enum social_hold_e *hold,
+                                        uint8_t *outstanding)
+{
+  uint32_t interval = g_social.image_interval_ms;
+
+  *hold = SOCIAL_HOLD_NONE;
+  *outstanding = social_results_outstanding(now);
+
+  if (g_social.tune.backlog_max > 0 &&
+      *outstanding >= g_social.tune.backlog_max &&
+      interval < g_social.tune.image_interval_max_ms)
+    {
+      interval = g_social.tune.image_interval_max_ms;
+      *hold    = SOCIAL_HOLD_BACKLOG;
+    }
+
+#if CONFIG_VS_SOCIAL_ALERT_IMAGE_INTERVAL_MS > 0
+  if (g_social.alert_active &&
+      interval < CONFIG_VS_SOCIAL_ALERT_IMAGE_INTERVAL_MS)
+    {
+      interval = CONFIG_VS_SOCIAL_ALERT_IMAGE_INTERVAL_MS;
+      *hold    = SOCIAL_HOLD_ALERT;
+    }
+#endif
+
+  return interval;
+}
+
 static void *social_capture_worker(void *arg)
 {
-  uint64_t next = social_now_ms();
+  /* The deadline the last frame was taken against.  The next one is due an
+   * interval after it, with the interval read fresh on every pass, so a hold
+   * that starts or ends takes effect on the frame that is waiting rather than
+   * on the one after it.
+   */
+
+  uint64_t taken = 0;
+  bool first = true;
+  enum social_hold_e held = SOCIAL_HOLD_NONE;
 
   (void)arg;
 
   for (; ; )
     {
       struct vs_media_frame_s frame;
+      enum social_hold_e hold;
+      uint8_t outstanding;
       uint64_t now;
+      uint64_t due;
       uint32_t interval;
       bool paused;
       int ret;
@@ -1858,11 +2999,40 @@ static void *social_capture_worker(void *arg)
       /* Read every iteration rather than once at the top.  social_image_push()
        * lengthens it when the ring overflows and the uploader shortens it again
        * when frames start getting through, so the sampler follows the link
-       * within one frame of the link changing.
+       * within one frame of the link changing.  The two holds in
+       * social_capture_interval() follow the cloud the same way.
        */
 
-      interval = g_social.image_interval_ms;
+      now = social_now_ms();
+      interval = social_capture_interval(now, &hold, &outstanding);
+      social_perf_sample(hold, now);
       pthread_mutex_unlock(&g_social.lock);
+
+      /* One line per change of hold, not per frame.  Printed outside the
+       * lock: the console is a mailbox channel that can block.
+       */
+
+      if (hold != held)
+        {
+          if (hold == SOCIAL_HOLD_ALERT)
+            {
+              printf("%s: image sampling held at %lu ms while an alert "
+                     "stands\n", SOCIAL_TAG, (unsigned long)interval);
+            }
+          else if (hold == SOCIAL_HOLD_BACKLOG)
+            {
+              printf("%s: image sampling held at %lu ms, %u result(s) "
+                     "outstanding\n", SOCIAL_TAG, (unsigned long)interval,
+                     (unsigned)outstanding);
+            }
+          else
+            {
+              printf("%s: image sampling hold released, %lu ms\n",
+                     SOCIAL_TAG, (unsigned long)interval);
+            }
+
+          held = hold;
+        }
 
       if (paused)
         {
@@ -1873,38 +3043,58 @@ static void *social_capture_worker(void *arg)
            */
 
           usleep(SOCIAL_AUDIO_IDLE_MS * 1000);
-          next = social_now_ms();
+          first = true;
           continue;
         }
 
-      now = social_now_ms();
-      if (now < next)
+      /* Sleep in slices rather than for the whole gap.  The gap can now be
+       * several seconds -- CONFIG_VS_SOCIAL_ALERT_IMAGE_INTERVAL_MS -- and a
+       * pause, a finalize or a hold ending all have to be seen before it is
+       * over: a stop request otherwise waited out the sleep before
+       * social_stop_producers() could join this thread.
+       */
+
+      due = first ? now : taken + interval;
+      if (now < due)
         {
-          usleep((useconds_t)(next - now) * 1000);
+          uint64_t wait = due - now;
+
+          if (wait > SOCIAL_CAPTURE_SLICE_MS)
+            {
+              wait = SOCIAL_CAPTURE_SLICE_MS;
+            }
+
+          usleep((useconds_t)wait * 1000);
           continue;
         }
 
-      /* The deadline advances from the previous deadline, not from now, so a
+      /* The schedule advances from the previous deadline, not from now, so a
        * frame that ran long is absorbed instead of pushing every later frame
        * back.  Resynchronised when it has fallen more than one interval
        * behind, which is the case where trying to catch up would just capture
-       * two frames back to back for no benefit.
+       * two frames back to back for no benefit -- and the case a hold ending
+       * produces, which then takes its first frame at once.
        */
 
-      next += interval;
-      if (next < now)
-        {
-          next = now + interval;
-        }
+      taken = (first || now - due > interval) ? now : due;
+      first = false;
 
-      /* The grab timeout follows the configured ceiling rather than the
-       * current interval: a backed-off sampler is waiting on the uplink, not
+      /* The grab timeout follows the configured base interval rather than
+       * the current one: a backed-off sampler is waiting on the uplink, not
        * on the camera, and stretching the camera's patience with it would turn
-       * one slow upload into a slow frame as well.
+       * one slow upload into a slow frame as well.  Never under three of the
+       * camera's own frame periods, which a short interval would otherwise
+       * cut into.
        */
 
-      ret = vs_media_stream_grab(g_social.camera, &frame,
-                                 CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS * 3u);
+      {
+        uint32_t patience = g_social.tune.image_interval_ms * 3u;
+        uint32_t frames = 3000u / g_social.tune.capture_fps;
+
+        ret = vs_media_stream_grab(g_social.camera, &frame,
+                                   patience > frames ? patience : frames);
+      }
+
       if (ret == -ECANCELED)
         {
           break;
@@ -2296,6 +3486,7 @@ static void *social_upload_worker(void *arg)
         {
           pthread_mutex_lock(&g_social.lock);
           g_social.upload_failed++;
+          social_perf_failed();
           pthread_mutex_unlock(&g_social.lock);
 
           /* -ESTALE means a later session replaced this one, so nothing here
@@ -2424,6 +3615,8 @@ static void *social_upload_worker(void *arg)
               }
           }
 
+        social_perf_upload(&slot, &result, began_ms);
+
         /* Images only.  An audio msgId cannot answer anything this session
          * acts on -- the cloud attaches an extreme frame's advice to the
          * image's msgId, not to any audio one -- so tracking it spent a slot
@@ -2433,7 +3626,8 @@ static void *social_upload_worker(void *arg)
 
         if (slot.type == VS_CLOUD_MEDIA_IMAGE)
           {
-            social_inflight_add(result.msg_id, slot.alert_gen);
+            social_inflight_add(result.msg_id, slot.alert_gen,
+                                slot.stamp_ms);
           }
 
         /* An image that made it through is the evidence that the link has room
@@ -2458,9 +3652,9 @@ static void *social_upload_worker(void *arg)
 
         if (slot.type == VS_CLOUD_MEDIA_IMAGE)
           {
+            uint32_t base = g_social.tune.image_interval_ms;
             uint32_t floor =
-              g_social.image_floor_ms > CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS ?
-              g_social.image_floor_ms : CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS;
+              g_social.image_floor_ms > base ? g_social.image_floor_ms : base;
             bool at_floor = g_social.image_interval_ms <= floor;
             uint8_t needed = at_floor ? SOCIAL_IMAGE_REPROBE_STREAK :
                                         SOCIAL_IMAGE_RECOVER_STREAK;
@@ -2480,7 +3674,7 @@ static void *social_upload_worker(void *arg)
                     recovered = next;
                     sped_up = true;
                   }
-                else if (floor > CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS)
+                else if (floor > base)
                   {
                     /* Open the floor by one step.  The interval follows on the
                      * next run, so a re-probe that was wrong costs one step of
@@ -2488,10 +3682,8 @@ static void *social_upload_worker(void *arg)
                      */
 
                     g_social.image_floor_ms =
-                      floor > SOCIAL_IMAGE_RECOVER_STEP_MS +
-                              CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS ?
-                      floor - SOCIAL_IMAGE_RECOVER_STEP_MS :
-                      CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS;
+                      floor > SOCIAL_IMAGE_RECOVER_STEP_MS + base ?
+                      floor - SOCIAL_IMAGE_RECOVER_STEP_MS : base;
 
                     reprobed = g_social.image_floor_ms;
                   }
@@ -3016,6 +4208,7 @@ static bool social_alert_release_stale(void)
 static void social_poll_once(void)
 {
   struct social_poll_scratch_s *scratch = g_social.poll;
+  uint64_t poll_began;
   size_t n = 0;
   size_t got = 0;
   size_t i;
@@ -3128,10 +4321,12 @@ static void social_poll_once(void)
       return;
     }
 
+  poll_began = social_now_ms();
   ret = vs_cloud_social_poll_event(g_social.session.session_id,
                                    scratch->ids, n, scratch->events,
                                    sizeof(scratch->events) /
                                    sizeof(scratch->events[0]), &got);
+  social_perf_poll(n, social_now_ms() - poll_began, ret >= 0);
   if (ret < 0)
     {
       /* Transport failures here are not fatal to the session: the data is
@@ -3152,6 +4347,7 @@ static void social_poll_once(void)
       bool deliver_advice = false;
       bool advice_quiet = false;
       bool advice_refused = false;
+      bool report_refusal = false;
       bool report_emotion = false;
       bool report_slot = false;
       uint8_t tracked = 0;
@@ -3339,6 +4535,9 @@ static void social_poll_once(void)
 
                   g_social.inflight[index].image_seen  = true;
                   g_social.inflight[index].image_at_ms = social_now_ms();
+                  social_perf_answer(&g_social.inflight[index],
+                                     g_social.inflight[index].image_at_ms,
+                                     true);
                   if (ev->extreme)
                     {
                       g_social.inflight[index].extreme = true;
@@ -3387,14 +4586,14 @@ static void social_poll_once(void)
                    * away most of the messages the advice was about to arrive
                    * under.  See social_inflight_s for the two log findings.
                    *
-                   * social_inflight_hold() gives an extreme entry the full
-                   * timeout and everything else the short grace window, so the
-                   * speculation costs table slots for a few poll cycles rather
-                   * than for the session.
+                   * social_inflight_answered() gives an extreme entry the
+                   * full timeout and everything else the short grace window,
+                   * so the speculation costs table slots for a few poll
+                   * cycles rather than for the session.
                    */
 
-                  social_inflight_hold(&g_social.inflight[index],
-                                       social_now_ms());
+                  social_inflight_answered(&g_social.inflight[index],
+                                           social_now_ms());
                   report_emotion = true;
 
                   /* Snapshotted here rather than read at the printf, which is
@@ -3436,12 +4635,15 @@ static void social_poll_once(void)
 
               if (ev->msg_event == VS_CLOUD_MSG_EVENT_AUDIO)
                 {
+                  bool promoted = false;
+
                   g_social.advice_pending_seen++;
                   if (!g_social.inflight[index].advice_seen)
                     {
                       g_social.inflight[index].advice_seen = true;
                       g_social.advice_slots_seen++;
                       report_slot = true;
+                      promoted = true;
                     }
 
                   /* The promotion, and it no longer waits for the image result.
@@ -3467,10 +4669,31 @@ static void social_poll_once(void)
                         {
                           g_social.emotion_extreme_late++;
                         }
+
+                      promoted = true;
                     }
 
-                  social_inflight_hold(&g_social.inflight[index],
-                                       social_now_ms());
+                  /* Held on the promotion, not on every report of the slot.
+                   *
+                   * The cloud re-reports a pending slot at 11 on every poll
+                   * for as long as the advice is being worked on, and the
+                   * hold used to run on each of them.  Every poll then moved
+                   * the deadline CONFIG_VS_SOCIAL_ADVICE_TIMEOUT_MS ahead of
+                   * now, so an advice that never came was waited for
+                   * indefinitely: the entry never left the table, the sweep
+                   * never reported it, and social_alert_release_stale()
+                   * deferred for the rest of the session.  That is the case
+                   * the timeout exists for -- measured 2026-09-08, a slot
+                   * reported at 11 on every poll until the session ended, and
+                   * no expiry -- so the clock starts once, when the entry is
+                   * first promoted.
+                   */
+
+                  if (promoted)
+                    {
+                      social_inflight_hold(&g_social.inflight[index],
+                                           social_now_ms());
+                    }
                 }
               break;
 
@@ -3576,22 +4799,49 @@ static void social_poll_once(void)
                * messages could still produce something.
                */
 
-              g_social.failed_results++;
-
               if (ev->msg_event == VS_CLOUD_MSG_EVENT_AUDIO)
                 {
+                  g_social.failed_results++;
                   advice_refused = true;
                   g_social.advice_refused++;
                   snprintf(dropped_id, sizeof(dropped_id), "%s", ev->msg_id);
                   snprintf(text, sizeof(text), "%s", ev->log);
                   social_inflight_remove(index);
                 }
+              else if (g_social.inflight[index].image_seen)
+                {
+                  /* The same answer again.  An image failure is re-reported
+                   * on every poll like any other state, and acting on each
+                   * copy re-armed the hold every cycle -- once the
+                   * registration deadline had passed, a failed frame was then
+                   * kept for as long as the cloud kept saying so.  Counted
+                   * with the other repeats, the same way an emotion result
+                   * already folded in is.
+                   */
+
+                  g_social.results_repeated++;
+                }
               else
                 {
+                  g_social.failed_results++;
                   g_social.inflight[index].image_seen  = true;
                   g_social.inflight[index].image_at_ms = social_now_ms();
-                  social_inflight_hold(&g_social.inflight[index],
-                                       social_now_ms());
+                  social_perf_answer(&g_social.inflight[index],
+                                     g_social.inflight[index].image_at_ms,
+                                     false);
+
+                  /* The first few reasons, which say whether frames fail on
+                   * their content (no face) or on the way in (a fetch that
+                   * raced the upload).  The count carries the rest.
+                   */
+
+                  if (g_social.failed_results <= SOCIAL_REFUSAL_REPORT_MAX)
+                    {
+                      snprintf(text, sizeof(text), "%s", ev->log);
+                      report_refusal = true;
+                    }
+                  social_inflight_answered(&g_social.inflight[index],
+                                           social_now_ms());
                 }
               break;
 
@@ -3673,6 +4923,12 @@ static void social_poll_once(void)
         {
           printf("%s: cloud will not advise on msg %s%s%s\n", SOCIAL_TAG,
                  dropped_id, text[0] != '\0' ? ": " : "", text);
+        }
+
+      if (report_refusal)
+        {
+          printf("%s: msg %s image refused: %s\n", SOCIAL_TAG, ev->msg_id,
+                 text[0] != '\0' ? text : "(no reason given)");
         }
 
       if (!deliver_advice && dropped_id[0] != '\0' && !advice_refused)
@@ -3792,8 +5048,12 @@ static void social_stop_producers(void)
    * This also frees the poll scratch, which is correct here: the session
    * thread's polling loop has already ended by the time either caller reaches
    * this function.
+   *
+   * The vs_perf totals go first, because every worker that feeds them has
+   * been joined and the release below frees them.
    */
 
+  social_perf_report(true);
   social_release_devices();
 }
 
@@ -3852,6 +5112,7 @@ static void social_release_devices(void)
   struct vs_audio_cap_s *mic;
   struct social_poll_scratch_s *poll;
   struct social_inflight_s *inflight;
+  struct social_perf_s *perf;
   bool poll_psram;
   bool inflight_psram;
 
@@ -3862,8 +5123,15 @@ static void social_release_devices(void)
   poll_psram = g_social.poll_psram;
   inflight   = g_social.inflight;
   inflight_psram = g_social.inflight_psram;
+  perf   = g_social.perf;
   g_social.camera = NULL;
   g_social.mic    = NULL;
+
+  /* The accounting's hooks run on every worker and test this pointer under
+   * the lock, so clearing it here is what retires them.
+   */
+
+  g_social.perf   = NULL;
 
   /* Cleared under the lock and before the free, so a poll that has already
    * loaded the pointer cannot be joined by one that loads it after the memory
@@ -3894,6 +5162,11 @@ static void social_release_devices(void)
   if (inflight != NULL)
     {
       social_free((unsigned char *)inflight, inflight_psram);
+    }
+
+  if (perf != NULL)
+    {
+      bk7258_psram_free(perf);
     }
 
   if (camera != NULL)
@@ -3957,13 +5230,15 @@ static void social_log_totals(void)
    */
 
   printf("%s: session %s totals: %lu frames (%lu malformed), %lu chunks, "
-         "%lu uploaded, %lu upload failures, %lu images dropped, "
-         "%lu audio dropped, %lu evicted unanswered, image interval %lu ms\n",
+         "%lu uploaded, %lu upload failures, %lu images dropped "
+         "(+%lu stale), %lu audio dropped, %lu evicted unanswered, "
+         "image interval %lu ms\n",
          SOCIAL_TAG, g_social.session.session_id,
          (unsigned long)g_social.image_seq, (unsigned long)malformed,
          (unsigned long)g_social.audio_seq, (unsigned long)g_social.uploaded,
          (unsigned long)g_social.upload_failed,
          (unsigned long)g_social.dropped_image,
+         (unsigned long)g_social.dropped_stale,
          (unsigned long)g_social.dropped_audio,
          (unsigned long)g_social.inflight_evicted,
          (unsigned long)g_social.image_interval_ms);
@@ -4744,7 +6019,7 @@ static void *social_session_worker(void *arg)
 
   ret = vs_media_stream_open(&g_social.camera, CONFIG_VS_SOCIAL_IMAGE_WIDTH,
                              CONFIG_VS_SOCIAL_IMAGE_HEIGHT,
-                             CONFIG_VS_SOCIAL_CAPTURE_FPS);
+                             g_social.tune.capture_fps);
   if (ret < 0)
     {
       printf("%s: camera unavailable: %d\n", SOCIAL_TAG, ret);
@@ -4770,6 +6045,12 @@ static void *social_session_worker(void *arg)
       vs_audio_capture_close(g_social.mic);
       g_social.mic = NULL;
     }
+
+  /* The vs_perf accounting, before any worker exists to feed it.  Optional:
+   * a session without it is the same session minus those lines.
+   */
+
+  social_perf_begin();
 
   /* The uploaders.  One is enough to run a session; the rest are throughput.
    *
@@ -4857,7 +6138,8 @@ static void *social_session_worker(void *arg)
         }
 
       social_poll_once();
-      usleep(CONFIG_VS_SOCIAL_POLL_INTERVAL_MS * 1000);
+      social_perf_tick();
+      usleep(g_social.tune.poll_interval_ms * 1000);
     }
 
   if (aborting)
@@ -5027,6 +6309,7 @@ int vs_social_start(uint32_t request_id)
   g_social.audio_seq      = 0;
   g_social.dropped_image  = 0;
   g_social.dropped_audio  = 0;
+  g_social.dropped_stale  = 0;
   g_social.uploaded       = 0;
   g_social.upload_failed  = 0;
   g_social.frames_malformed = 0;
@@ -5038,7 +6321,7 @@ int vs_social_start(uint32_t request_id)
    * or the same one an hour later, is entitled to find out for itself.
    */
 
-  g_social.image_interval_ms = CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS;
+  g_social.image_interval_ms = g_social.tune.image_interval_ms;
   g_social.image_ok_streak   = 0;
   g_social.image_floor_ms    = 0;
 
@@ -5126,10 +6409,12 @@ int vs_social_start(uint32_t request_id)
    * yet.  The session worker allocates it from PSRAM and zeroes it there, which
    * is also the only place that knows whether the allocation succeeded.  The
    * pointer is cleared instead, so nothing between here and that allocation can
-   * reach a table left over from the previous session.
+   * reach a table left over from the previous session.  The accounting is
+   * the same, allocated by social_perf_begin().
    */
 
   g_social.inflight = NULL;
+  g_social.perf     = NULL;
 
   g_social.running = true;
   pthread_mutex_unlock(&g_social.lock);
@@ -5341,6 +6626,62 @@ bool vs_social_active(void)
   active = g_social.running;
   pthread_mutex_unlock(&g_social.lock);
   return active;
+}
+
+void vs_social_default_tune(struct vs_social_tune_s *out)
+{
+  if (out == NULL)
+    {
+      return;
+    }
+
+  out->image_interval_ms     = CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MS;
+  out->image_interval_max_ms = CONFIG_VS_SOCIAL_IMAGE_INTERVAL_MAX_MS;
+  out->backlog_max           = CONFIG_VS_SOCIAL_RESULT_BACKLOG_MAX;
+  out->capture_fps           = CONFIG_VS_SOCIAL_CAPTURE_FPS;
+  out->poll_interval_ms      = CONFIG_VS_SOCIAL_POLL_INTERVAL_MS;
+}
+
+void vs_social_get_tune(struct vs_social_tune_s *out)
+{
+  if (out == NULL)
+    {
+      return;
+    }
+
+  pthread_mutex_lock(&g_social.lock);
+  *out = g_social.tune;
+  pthread_mutex_unlock(&g_social.lock);
+}
+
+int vs_social_set_tune(const struct vs_social_tune_s *in)
+{
+  /* Bounds that keep every derived value sane rather than ones that are
+   * advisable: a measurement may want to push past what a product would
+   * ship.  The backlog limit cannot exceed the table it counts in.
+   */
+
+  if (in == NULL ||
+      in->image_interval_ms < 100 || in->image_interval_ms > 30000 ||
+      in->image_interval_max_ms < in->image_interval_ms ||
+      in->image_interval_max_ms > 60000 ||
+      in->backlog_max > CONFIG_VS_SOCIAL_INFLIGHT_MAX ||
+      in->capture_fps < 1 || in->capture_fps > 15 ||
+      in->poll_interval_ms < 200 || in->poll_interval_ms > 30000)
+    {
+      return -EINVAL;
+    }
+
+  pthread_mutex_lock(&g_social.lock);
+  if (g_social.running)
+    {
+      pthread_mutex_unlock(&g_social.lock);
+      return -EBUSY;
+    }
+
+  g_social.tune = *in;
+  pthread_mutex_unlock(&g_social.lock);
+  return 0;
 }
 
 void vs_social_close(void)
