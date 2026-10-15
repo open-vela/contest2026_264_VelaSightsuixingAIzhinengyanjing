@@ -191,6 +191,8 @@ struct vs_app_status_s
   bool     volume_editing;
   bool     alert_active;
   uint8_t  volume;
+  uint8_t  battery_percent;  /* estimated, see vs_battery.h */
+  uint16_t battery_mv;       /* VBAT; 0 until the first reading */
   uint16_t history_index;
   uint16_t history_count;
   enum vs_emotion_e emotion;

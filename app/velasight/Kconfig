@@ -1491,6 +1491,18 @@ config VS_HAPTIC_ALERT_COOLDOWN_MS
 		cluster would be noise.  The screen still follows each one.  0
 		vibrates on every raise.
 
+config VS_BATTERY_POLL_MS
+	int "VelaSight battery reading interval (ms)"
+	default 60000
+	range 5000 3600000
+	depends on LVX_USE_DEMO_CONTEST2026_264_VELASIGHT && BK7258_SARADC
+	---help---
+		How often the UI reads VBAT from /dev/adc0, which it also does once
+		as soon as it starts.  A reading is the median of three
+		conversions, about 15 ms on the UI thread, and one console line.
+		The value is published with the status ("velasight status" prints
+		it as bat=) and not drawn on either screen yet.
+
 config VS_SOCIAL_ADVICE_TIMEOUT_MS
 	int "VelaSight social advice wait (ms)"
 	default 60000

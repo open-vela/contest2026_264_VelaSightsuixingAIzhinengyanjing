@@ -42,6 +42,7 @@
 #include <unistd.h>
 
 #include "include/vs_app.h"
+#include "include/vs_battery.h"
 #include "include/vs_cli.h"
 #include "include/vs_haptic.h"
 #include "include/vs_social.h"
@@ -108,6 +109,16 @@
 #  define CLI_HAPTIC_ON_MS  80
 #  define CLI_HAPTIC_OFF_MS 120
 #endif
+
+/* "battery <n>": the gap between readings, and how many are printed one by
+ * one before the command only summarises.  The gap keeps a long run, at
+ * about 5 ms a conversion, from holding the converter for more than about
+ * a tenth of the time the CP might want it.
+ */
+
+#define CLI_BATTERY_GAP_MS     50u
+#define CLI_BATTERY_SHOWN      10u
+#define CLI_BATTERY_OUTLIER_MV 40u   /* five times the noise seen */
 
 /* Page sets, as masks over enum vs_page_e. */
 
@@ -365,6 +376,19 @@ static void cli_print_status(const struct vs_app_status_s *st)
           (unsigned int)st->history_count, vs_social_active(),
           vs_voice_ready(), vs_tts_busy(), st->alert_active,
           (unsigned long)st->inputs);
+
+  /* The UI's last reading, not a fresh one; "battery" takes a fresh one. */
+
+  if (st->battery_mv != 0)
+    {
+      cli_cat(line, sizeof(line), &len, " bat=%umV/%u%%",
+              (unsigned int)st->battery_mv,
+              (unsigned int)st->battery_percent);
+    }
+  else
+    {
+      cli_cat(line, sizeof(line), &len, " bat=-");
+    }
 
   if (st->page == VS_PAGE_ERROR)
     {
@@ -1791,6 +1815,147 @@ static int cli_haptic(int argc, char *argv[],
 }
 
 /****************************************************************************
+ * Name: cli_battery
+ *
+ * Description:
+ *   "battery [count]".  Fresh readings of VBAT, independent of the UI's own
+ *   once a minute: each one printed up to CLI_BATTERY_SHOWN, then a
+ *   summary.  busy= counts readings the CP kept the converter through, and
+ *   ms= is what one reading costs the caller, average/worst; a long run is
+ *   how to measure both.
+ *
+ ****************************************************************************/
+
+static int cli_battery(int argc, char *argv[],
+                       const struct vs_app_status_s *st)
+{
+  struct vs_battery_s battery;
+  unsigned int count = 1;
+  unsigned int ok = 0;
+  unsigned int busy = 0;
+  unsigned int failed = 0;
+  unsigned int i;
+  uint32_t mv_sum = 0;
+  uint32_t ms_sum = 0;
+  uint32_t ms_max = 0;
+  uint16_t mv_min = UINT16_MAX;
+  uint16_t mv_max = 0;
+  int last_err = 0;
+  char detail[24];
+
+  memset(&battery, 0, sizeof(battery));
+
+  if (argc > 2)
+    {
+      int given = atoi(argv[2]);
+
+      if (given < 1 || given > 1000)
+        {
+          printf("vs_cli: battery takes 1..1000 readings\n");
+          return 2;
+        }
+
+      count = (unsigned int)given;
+    }
+
+  for (i = 0; i < count; i++)
+    {
+      struct vs_battery_s reading;
+      uint32_t began = cli_now_ms();
+      uint32_t took;
+      int ret = vs_battery_read(&reading);
+
+      took = cli_now_ms() - began;
+      ms_sum += took;
+      ms_max = took > ms_max ? took : ms_max;
+
+      if (ret == 0)
+        {
+          /* Past the first few, a reading far from the running mean is
+           * worth its own line whether or not it is one of the shown ones:
+           * an outlier is what a converter shared with the CP would get
+           * wrong.
+           */
+
+          if (ok >= 5)
+            {
+              uint32_t mean = mv_sum / ok;
+              uint32_t off  = reading.mv > mean ? reading.mv - mean :
+                                                  mean - reading.mv;
+
+              if (off > CLI_BATTERY_OUTLIER_MV)
+                {
+                  printf("vs_cli: battery %u mv=%u raw=%ld is %lu mV off "
+                         "the mean\n", i + 1, (unsigned int)reading.mv,
+                         (long)reading.raw, (unsigned long)off);
+                }
+            }
+
+          battery = reading;
+          ok++;
+          mv_sum += reading.mv;
+          mv_min = reading.mv < mv_min ? reading.mv : mv_min;
+          mv_max = reading.mv > mv_max ? reading.mv : mv_max;
+        }
+      else if (ret == -EBUSY)
+        {
+          busy++;
+        }
+      else
+        {
+          failed++;
+          last_err = ret;
+        }
+
+      if (count > 1 && i < CLI_BATTERY_SHOWN)
+        {
+          if (ret == 0)
+            {
+              printf("vs_cli: battery %u mv=%u pct=%u raw=%ld\n", i + 1,
+                     (unsigned int)reading.mv,
+                     (unsigned int)reading.percent, (long)reading.raw);
+            }
+          else
+            {
+              printf("vs_cli: battery %u err=%d\n", i + 1, ret);
+            }
+        }
+
+      if (i + 1 < count)
+        {
+          usleep(CLI_BATTERY_GAP_MS * 1000);
+        }
+    }
+
+  if (ok == 0)
+    {
+      snprintf(detail, sizeof(detail), "err=%d",
+               last_err != 0 ? last_err : -EBUSY);
+      return cli_finish(false, "battery", st,
+                        last_err == -ENOENT ? "no /dev/adc0" :
+                        last_err == -ENOSYS ? "built without the SARADC" :
+                        failed == 0 ? "the CP kept the converter" :
+                                      "no reading",
+                        detail);
+    }
+
+  if (count == 1)
+    {
+      return cli_ok("battery", st, "mv=%u pct=%u raw=%ld ms=%lu",
+                    (unsigned int)battery.mv,
+                    (unsigned int)battery.percent, (long)battery.raw,
+                    (unsigned long)ms_sum);
+    }
+
+  return cli_ok("battery", st, "n=%u ok=%u busy=%u err=%u mv=%u..%u "
+                "avg=%lu pct=%u ms=%lu/%lu", count, ok, busy, failed,
+                (unsigned int)mv_min, (unsigned int)mv_max,
+                (unsigned long)(mv_sum / ok),
+                (unsigned int)battery.percent,
+                (unsigned long)(ms_sum / count), (unsigned long)ms_max);
+}
+
+/****************************************************************************
  * Public Functions
  ****************************************************************************/
 
@@ -1832,6 +1997,7 @@ void vs_cli_usage(void)
          "apart\n"
          "                        (the emotion alert's pattern by "
          "default)\n"
+         "  battery [n]           read VBAT now, n times (1)\n"
          "  cloudprobe            one cloud round trip, synthetic payload\n"
          "Each command ends with \"vs_cli: ok ...\" or "
          "\"vs_cli: fail ...\".\n");
@@ -1852,13 +2018,14 @@ int vs_cli_main(int argc, char *argv[])
   cmd = argv[1];
   memset(&st, 0, sizeof(st));
 
-  /* The one that drives hardware directly, and so works with no UI too. */
+  /* The two that drive hardware directly, and so work with no UI too. */
 
-  if (strcmp(cmd, "haptic") == 0)
+  if (strcmp(cmd, "haptic") == 0 || strcmp(cmd, "battery") == 0)
     {
       const struct vs_app_status_s *ui = cli_read(&st) == 0 ? &st : NULL;
 
-      return cli_haptic(argc, argv, ui);
+      return cmd[0] == 'h' ? cli_haptic(argc, argv, ui) :
+                             cli_battery(argc, argv, ui);
     }
 
   if (cli_read(&st) < 0)

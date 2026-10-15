@@ -31,6 +31,7 @@
 
 #include "include/vs_app.h"
 #include "include/vs_audio.h"
+#include "include/vs_battery.h"
 #include "include/vs_cloud.h"
 #include "include/vs_display.h"
 #include "include/vs_haptic.h"
@@ -192,6 +193,19 @@
  */
 
 #define VS_WIFI_RETRY_MS 10000
+
+/* The battery reading's cadence, and how soon a failed one is tried again.
+ * /dev/adc0 is registered late in bring-up and this loop can be running
+ * before it exists, and the driver gives up on a CP that holds the
+ * converter for a while; neither is worth a whole interval without a
+ * reading.
+ */
+
+#ifndef CONFIG_VS_BATTERY_POLL_MS
+#  define CONFIG_VS_BATTERY_POLL_MS 60000
+#endif
+
+#define VS_BATTERY_RETRY_MS 5000
 
 #define VS_APP_EVENT_QUEUE_SIZE 8
 
@@ -500,6 +514,16 @@ struct vs_runtime_s
    */
 
   uint32_t inputs_handled;
+
+  /* The last battery reading and when to take the next.  Published with the
+   * status, not drawn yet: vs_snapshot() keeps battery_present false.
+   * battery_mv stays 0 until the first reading lands.
+   */
+
+  uint32_t battery_next_ms;
+  uint16_t battery_mv;
+  uint8_t  battery_percent;
+  uint8_t  battery_failures;
 };
 
 struct vs_network_worker_s
@@ -1777,6 +1801,8 @@ static void vs_publish_status(const struct vs_runtime_s *runtime,
   status->history_blank   = runtime->history_blank;
   status->volume_editing  = runtime->volume_editing;
   status->alert_active    = runtime->alert_active;
+  status->battery_mv      = runtime->battery_mv;
+  status->battery_percent = runtime->battery_percent;
   status->volume          = runtime->volume_level;
   status->history_index   = snapshot->history_index;
   status->history_count   = snapshot->history_count;
@@ -3612,6 +3638,55 @@ static int vs_voice_open_task(int argc, FAR char *argv[])
   return 0;
 }
 
+#ifdef CONFIG_BK7258_SARADC
+/****************************************************************************
+ * Name: vs_poll_battery
+ *
+ * Description:
+ *   Take one battery reading -- the median of VS_BATTERY_SAMPLES
+ *   conversions, about 15 ms -- and schedule the next.  On this thread
+ *   rather than a worker of its own: that is less than one panel flush,
+ *   and a thread would cost a stack out of the SRAM heap for something
+ *   that runs once a minute.
+ *
+ *   Every reading is logged, so a long session's log is also its discharge
+ *   curve.  A failure is logged once per run of them.
+ *
+ ****************************************************************************/
+
+static void vs_poll_battery(struct vs_runtime_s *runtime)
+{
+  struct vs_battery_s battery;
+  int ret = vs_battery_sample(&battery);
+
+  if (ret < 0)
+    {
+      if (runtime->battery_failures == 0)
+        {
+          printf("velasight: battery not read (%d), retrying every %d s\n",
+                 ret, VS_BATTERY_RETRY_MS / 1000);
+        }
+
+      if (runtime->battery_failures < UINT8_MAX)
+        {
+          runtime->battery_failures++;
+        }
+
+      runtime->battery_next_ms = vs_app_now_ms() + VS_BATTERY_RETRY_MS;
+      return;
+    }
+
+  runtime->battery_failures = 0;
+  runtime->battery_mv       = battery.mv;
+  runtime->battery_percent  = battery.percent;
+  runtime->battery_next_ms  = vs_app_now_ms() + CONFIG_VS_BATTERY_POLL_MS;
+
+  printf("velasight: battery %u mV, about %u%% (code %ld)\n",
+         (unsigned int)battery.mv, (unsigned int)battery.percent,
+         (long)battery.raw);
+}
+#endif
+
 int vs_app_run(void)
 {
   struct vs_display_s *display = NULL;
@@ -3804,6 +3879,10 @@ int vs_app_run(void)
   g_app_status->ready = true;
   pthread_mutex_unlock(&g_app_events.lock);
 
+  /* The first battery reading on the first pass, so the boot log has one. */
+
+  runtime.battery_next_ms = vs_app_now_ms();
+
   vs_render(display, &runtime);
   for (;;)
     {
@@ -3968,6 +4047,16 @@ int vs_app_run(void)
             }
           vs_render(display, &runtime);
         }
+
+#ifdef CONFIG_BK7258_SARADC
+      /* Rendered only to publish it; nothing on either screen changes. */
+
+      if ((int32_t)(vs_app_now_ms() - runtime.battery_next_ms) >= 0)
+        {
+          vs_poll_battery(&runtime);
+          vs_render(display, &runtime);
+        }
+#endif
 
       vs_display_tick(display);
 
