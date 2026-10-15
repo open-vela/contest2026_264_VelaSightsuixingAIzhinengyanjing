@@ -33,6 +33,7 @@
 #include "include/vs_audio.h"
 #include "include/vs_cloud.h"
 #include "include/vs_display.h"
+#include "include/vs_haptic.h"
 #include "include/vs_history.h"
 #include "include/vs_input.h"
 #include "include/vs_network.h"
@@ -2294,6 +2295,35 @@ static void vs_set_error(struct vs_runtime_s *runtime, int error,
   runtime->page = VS_PAGE_ERROR;
 }
 
+/****************************************************************************
+ * Name: vs_alert_vibrate
+ *
+ * Description:
+ *   The wearer's half of an emotion alert.  Worn on the temple the screen
+ *   faces away from them, so the page change alone tells everyone nearby
+ *   except the person it is meant for; the buzz is what makes them look.
+ *   vs_haptic_alert() returns at once and spaces the vibrations by its own
+ *   cooldown, so this costs the UI thread nothing.
+ *
+ ****************************************************************************/
+
+static void vs_alert_vibrate(void)
+{
+  int ret = vs_haptic_alert();
+
+  if (ret == 0)
+    {
+      printf("velasight: emotion alert raised, vibrating\n");
+    }
+  else
+    {
+      printf("velasight: emotion alert raised, no vibration (%s)\n",
+             ret == -EALREADY ? "cooldown" :
+             ret == -EBUSY    ? "motor busy" :
+             ret == -ENOSYS   ? "disabled" : "error");
+    }
+}
+
 static void vs_handle_app_event(struct vs_runtime_s *runtime,
                                 struct vs_network_s *network,
                                 const struct vs_app_event_s *event)
@@ -2416,20 +2446,32 @@ static void vs_handle_app_event(struct vs_runtime_s *runtime,
          * the advice arrives once per extreme run and has to outlive them.  It
          * used to be carried on this event and written to the same field, which
          * is why it was on screen for one poll and then gone.
+         *
+         * The vibration follows the page rule and fires on the transition
+         * only.  Every repeat of this event for a standing alert would
+         * otherwise buzz again, once or twice per poll interval.
          */
 
-        runtime->emotion = event->emotion;
-        runtime->emotion_color = event->color;
-        runtime->emotion_extreme = event->extreme;
-        runtime->alert_active = true;
-        snprintf(runtime->alert_text, sizeof(runtime->alert_text), "%s",
-                 event->text);
+        {
+          bool raised = !runtime->alert_active;
 
-        if (runtime->page == VS_PAGE_SOCIAL_RUNNING ||
-            runtime->page == VS_PAGE_SOCIAL_ALERT)
-          {
-            runtime->page = VS_PAGE_SOCIAL_ALERT;
-          }
+          runtime->emotion = event->emotion;
+          runtime->emotion_color = event->color;
+          runtime->emotion_extreme = event->extreme;
+          runtime->alert_active = true;
+          snprintf(runtime->alert_text, sizeof(runtime->alert_text), "%s",
+                   event->text);
+
+          if (runtime->page == VS_PAGE_SOCIAL_RUNNING ||
+              runtime->page == VS_PAGE_SOCIAL_ALERT)
+            {
+              runtime->page = VS_PAGE_SOCIAL_ALERT;
+              if (raised)
+                {
+                  vs_alert_vibrate();
+                }
+            }
+        }
         break;
 
       case VS_APP_EVENT_SOCIAL_ADVICE:

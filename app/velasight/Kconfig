@@ -1440,6 +1440,57 @@ config VS_SOCIAL_ALERT_HOLD_MS
 		has timed out stops holding the alert in the same pass -- which is
 		what makes the wait bounded rather than open-ended.
 
+config VS_HAPTIC_ALERT
+	bool "VelaSight vibrate when an emotion alert is raised"
+	default y
+	depends on LVX_USE_DEMO_CONTEST2026_264_VELASIGHT && PWM && SCHED_HPWORK
+	---help---
+		A short buzz from the vibration motor (/dev/pwm0) when a social
+		session raises an emotion alert.
+
+		Worn on the temple, the screen faces sideways and the wearer
+		cannot see it, so without this the alert reaches everyone but the
+		person it is for.  It fires on the alert being raised, not on every
+		reading folded into it -- those arrive once or twice per poll
+		interval for as long as the alert stands -- and only on the running
+		and alert pages: not while paused, ending or summarising.
+
+config VS_HAPTIC_ALERT_PULSES
+	int "VelaSight alert vibration pulses"
+	default 2
+	range 1 5
+	depends on VS_HAPTIC_ALERT
+	---help---
+		2 short pulses is app/social_cue's "hint" pattern, the one the 8.16
+		bring-up record verified on this board as "提示 2 短", and different
+		enough from a single pulse to read as a message rather than a
+		bump.
+
+config VS_HAPTIC_ALERT_ON_MS
+	int "VelaSight alert vibration pulse length (ms)"
+	default 80
+	range 20 1000
+	depends on VS_HAPTIC_ALERT
+
+config VS_HAPTIC_ALERT_OFF_MS
+	int "VelaSight alert vibration gap (ms)"
+	default 120
+	range 20 1000
+	depends on VS_HAPTIC_ALERT
+
+config VS_HAPTIC_ALERT_COOLDOWN_MS
+	int "VelaSight alert vibration cooldown (ms)"
+	default 10000
+	range 0 600000
+	depends on VS_HAPTIC_ALERT
+	---help---
+		The least time between two alert vibrations.  An alert can clear
+		and be raised again within seconds when the reading hovers at the
+		edge, and the 10-minute face session of 2026-10-14
+		(vs-264-96c1a8c9) raised 22 alerts; buzzing on every one of a
+		cluster would be noise.  The screen still follows each one.  0
+		vibrates on every raise.
+
 config VS_SOCIAL_ADVICE_TIMEOUT_MS
 	int "VelaSight social advice wait (ms)"
 	default 60000

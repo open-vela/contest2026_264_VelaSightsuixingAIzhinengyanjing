@@ -43,6 +43,7 @@
 
 #include "include/vs_app.h"
 #include "include/vs_cli.h"
+#include "include/vs_haptic.h"
 #include "include/vs_social.h"
 #include "include/vs_tts.h"
 #include "include/vs_voice.h"
@@ -95,6 +96,18 @@
 
 #define CLI_RUN_SECONDS   30u     /* "social run" with no duration */
 #define CLI_RUN_REPORT_MS 10000u  /* a line this often while it runs */
+
+/* "haptic" with no arguments plays the alert's own pattern. */
+
+#ifdef CONFIG_VS_HAPTIC_ALERT
+#  define CLI_HAPTIC_PULSES CONFIG_VS_HAPTIC_ALERT_PULSES
+#  define CLI_HAPTIC_ON_MS  CONFIG_VS_HAPTIC_ALERT_ON_MS
+#  define CLI_HAPTIC_OFF_MS CONFIG_VS_HAPTIC_ALERT_OFF_MS
+#else
+#  define CLI_HAPTIC_PULSES 2
+#  define CLI_HAPTIC_ON_MS  80
+#  define CLI_HAPTIC_OFF_MS 120
+#endif
 
 /* Page sets, as masks over enum vs_page_e. */
 
@@ -1692,6 +1705,68 @@ static int cli_wait_cmd(int argc, char *argv[], struct vs_app_status_s *st)
 }
 
 /****************************************************************************
+ * Hardware, with or without a UI
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: cli_haptic
+ *
+ * Description:
+ *   "haptic [count [on_ms [off_ms]]]".  Vibrate now, with the emotion
+ *   alert's pattern unless told otherwise, and end once the motor has
+ *   stopped.  Whether it was felt is for the person holding the board:
+ *   the PWM driver cannot tell a spinning motor from an unconnected pad.
+ *
+ ****************************************************************************/
+
+static int cli_haptic(int argc, char *argv[],
+                      const struct vs_app_status_s *st)
+{
+  unsigned int count  = CLI_HAPTIC_PULSES;
+  unsigned int on_ms  = CLI_HAPTIC_ON_MS;
+  unsigned int off_ms = CLI_HAPTIC_OFF_MS;
+  uint32_t deadline;
+  char detail[48];
+  int ret;
+
+  if (argc > 2)
+    {
+      count = (unsigned int)atoi(argv[2]);
+    }
+
+  if (argc > 3)
+    {
+      on_ms = (unsigned int)atoi(argv[3]);
+    }
+
+  if (argc > 4)
+    {
+      off_ms = (unsigned int)atoi(argv[4]);
+    }
+
+  ret = vs_haptic_pulse(count, on_ms, off_ms);
+  if (ret < 0)
+    {
+      snprintf(detail, sizeof(detail), "err=%d", ret);
+      return cli_finish(false, "haptic", st,
+                        ret == -EINVAL ? "1..5 pulses of 20..1000 ms" :
+                        ret == -EBUSY  ? "a pattern is still running" :
+                        ret == -ENOSYS ? "built without PWM" :
+                                         "the pattern did not start",
+                        detail);
+    }
+
+  deadline = cli_now_ms() + count * (on_ms + off_ms) + 1000u;
+  while (vs_haptic_busy() && !cli_expired(deadline))
+    {
+      usleep(20 * 1000);
+    }
+
+  return cli_ok("haptic", st, "count=%u on_ms=%u off_ms=%u", count, on_ms,
+                off_ms);
+}
+
+/****************************************************************************
  * Public Functions
  ****************************************************************************/
 
@@ -1729,6 +1804,10 @@ void vs_cli_usage(void)
          "  key <k> [g]           k confirm|back|next|combo, "
          "g short|long|hold|cancel\n"
          "  wait <page,...> [s]   until the UI shows one of the pages\n"
+         "  haptic [n [on [off]]] vibrate now: n pulses of on ms, off ms "
+         "apart\n"
+         "                        (the emotion alert's pattern by "
+         "default)\n"
          "  cloudprobe            one cloud round trip, synthetic payload\n"
          "Each command ends with \"vs_cli: ok ...\" or "
          "\"vs_cli: fail ...\".\n");
@@ -1748,6 +1827,15 @@ int vs_cli_main(int argc, char *argv[])
 
   cmd = argv[1];
   memset(&st, 0, sizeof(st));
+
+  /* The one that drives hardware directly, and so works with no UI too. */
+
+  if (strcmp(cmd, "haptic") == 0)
+    {
+      const struct vs_app_status_s *ui = cli_read(&st) == 0 ? &st : NULL;
+
+      return cli_haptic(argc, argv, ui);
+    }
 
   if (cli_read(&st) < 0)
     {
