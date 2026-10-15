@@ -77,7 +77,7 @@
 #define VS_SOCIAL_STAGE_TIMEOUT_MS 40000
 
 #ifndef CONFIG_VS_SOCIAL_FINALIZE_TIMEOUT_MS
-#  define CONFIG_VS_SOCIAL_FINALIZE_TIMEOUT_MS 60000
+#  define CONFIG_VS_SOCIAL_FINALIZE_TIMEOUT_MS 240000
 #endif
 
 /* Finalizing is the exception, and its bound has to be derived rather than

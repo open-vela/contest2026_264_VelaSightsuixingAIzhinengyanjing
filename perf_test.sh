@@ -129,7 +129,7 @@ for i in $(seq 1 "$RUNS"); do
     break
   fi
   wait_idle
-  console $((SECONDS_PER_RUN + 360)) 'vs_cli: (ok|fail) social' "$log" \
+  console $((SECONDS_PER_RUN + 480)) 'vs_cli: (ok|fail) social' "$log" \
     "velasight social run $SECONDS_PER_RUN"
   logs+=("$log")
   grep -aq 'vs_cli: ok social' "$log" || failed=$((failed + 1))

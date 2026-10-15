@@ -955,8 +955,8 @@ config VS_SOCIAL_POLL_INTERVAL_MS
 
 config VS_SOCIAL_FINALIZE_TIMEOUT_MS
 	int "VelaSight social finalize timeout (ms)"
-	default 90000
-	range 5000 180000
+	default 240000
+	range 5000 600000
 	depends on LVX_USE_DEMO_CONTEST2026_264_VELASIGHT
 	---help---
 		How long to poll for the minutes after asking the cloud to close
@@ -989,6 +989,18 @@ config VS_SOCIAL_FINALIZE_TIMEOUT_MS
 		known to reach nearly a minute.  Waiting costs a spinner; timing
 		out early discards minutes the cloud did produce and asks the user
 		to do something about a problem that does not exist.
+
+		240000, because the spread was a property of short sessions.
+		Every figure above came from sessions of a minute or less.  A
+		ten-minute session with a face in front of the camera
+		(2026-10-14, vs-264-96c1a8c9) had no minutes when the 90 s ran
+		out, and a retry found them about 187 s after the stop.  Against
+		60 s sessions on the same day, which had theirs in about 16 s,
+		that is roughly 19 s per minute of conversation, so this covers
+		about ten minutes with a minute to spare.  The cost is on a cloud
+		that never answers: the retry prompt now comes after four minutes
+		instead of one and a half.  The user can still press back to leave
+		the page at any time.
 
 config VS_SOCIAL_DOWNLOAD_BLOCK_BYTES
 	int "VelaSight download write block (bytes)"

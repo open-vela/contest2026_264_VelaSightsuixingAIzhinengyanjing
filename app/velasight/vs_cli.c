@@ -59,6 +59,10 @@
 #  define CONFIG_VS_COMBO_PRESS_MS 2000
 #endif
 
+#ifndef CONFIG_VS_SOCIAL_FINALIZE_TIMEOUT_MS
+#  define CONFIG_VS_SOCIAL_FINALIZE_TIMEOUT_MS 240000
+#endif
+
 /* How often a wait reads the status, and how long the UI may take to act on
  * an injected gesture.  The second is generous because the UI thread can be
  * held off for a few hundred milliseconds at a time during a session -- a
@@ -76,10 +80,18 @@
 
 #define CLI_START_MS     45000u   /* the starting page allows 40 s */
 #define CLI_PAUSE_MS     45000u   /* so do pausing and resuming */
-#define CLI_FINALIZE_MS  300000u  /* finalizing: a budget per stage */
 #define CLI_VOICE_MS     30000u
 #define CLI_NET_MS       60000u
 #define CLI_SETTLE_MS    10000u   /* a saving page, the end of boot */
+
+/* The whole finalize, from the stop gesture to the result page, which is one
+ * wait rather than one per stage.  So it is derived from the longest stage,
+ * waiting for the minutes, plus two minutes for stopping, closing, saving
+ * and fetching the spoken minutes around it.  A fixed figure would turn into
+ * the shorter bound the moment that Kconfig value was raised past it.
+ */
+
+#define CLI_FINALIZE_MS  (CONFIG_VS_SOCIAL_FINALIZE_TIMEOUT_MS + 120000u)
 
 #define CLI_RUN_SECONDS   30u     /* "social run" with no duration */
 #define CLI_RUN_REPORT_MS 10000u  /* a line this often while it runs */
