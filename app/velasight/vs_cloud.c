@@ -5210,6 +5210,14 @@ struct cloud_file_sink_s
   bool expired;   /* refused because the deadline passed */
   bool cancelled; /* refused because the caller asked to stop */
 
+  /* The caller's progress hook, told after every record, and the resumes
+   * so far, which it gets with each call.
+   */
+
+  void (*progress)(void *arg, size_t written, unsigned int resumes);
+  void *progress_arg;
+  unsigned int resumes;
+
   /* The aggregation buffer.  NULL is a supported state and means "write every
    * record straight through", which is what happens when PSRAM could not spare
    * the block -- slow, but a slow download beats a failed one.
@@ -5403,12 +5411,20 @@ static int cloud_file_sink(void *arg, const void *data, size_t len)
       sink->next_report = sink->written + CLOUD_DOWNLOAD_REPORT_STRIDE;
     }
 
+  if (sink->progress != NULL)
+    {
+      sink->progress(sink->progress_arg, sink->written, sink->resumes);
+    }
+
   return 0;
 }
 
 int vs_cloud_download_to_file(const char *url, const char *path,
                               size_t max_bytes, uint32_t timeout_ms,
                               bool (*cancel)(void),
+                              void (*progress)(void *arg, size_t written,
+                                               unsigned int resumes),
+                              void *progress_arg,
                               size_t *len)
 {
   struct cloud_url_s *parsed = NULL;
@@ -5460,8 +5476,10 @@ int vs_cloud_download_to_file(const char *url, const char *path,
    * cloud_file_sink() for why either alone is not a bound.
    */
 
-  sink.deadline = deadline;
-  sink.cancel   = cancel;
+  sink.deadline     = deadline;
+  sink.cancel       = cancel;
+  sink.progress     = progress;
+  sink.progress_arg = progress_arg;
 
   /* The write aggregation buffer.  Optional by design: cloud_file_sink() falls
    * back to writing each record straight through when this is NULL, which is
@@ -5640,6 +5658,19 @@ int vs_cloud_download_to_file(const char *url, const char *path,
           printf("%s: resuming %s from %zu bytes after %d (attempt %u of "
                  "%d)\n", CLOUD_TAG, path, sink.written, http, stalls + 1,
                  CONFIG_VS_SOCIAL_DOWNLOAD_ATTEMPTS);
+
+          /* Counted over the transfer rather than taken from stalls, which
+           * a completed window resets: the caller is told how often the
+           * link dropped, not how many attempts the current window has
+           * left.
+           */
+
+          sink.resumes++;
+          if (progress != NULL)
+            {
+              progress(progress_arg, sink.written, sink.resumes);
+            }
+
           continue;
         }
 

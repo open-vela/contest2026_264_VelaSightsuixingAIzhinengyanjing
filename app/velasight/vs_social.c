@@ -781,6 +781,13 @@ struct social_state_s
   uint32_t uploaded;
   uint32_t upload_failed;
 
+  /* Items a worker has taken off a ring and not yet finished sending.  Only
+   * what the stop's "还剩 N 项" line adds to the ring counts, so the count
+   * does not drop by one each time a worker picks an item up.
+   */
+
+  uint8_t upload_busy;
+
   /* What a retry needs to resume from, and whether there is anything to
    * resume.
    *
@@ -1388,8 +1395,12 @@ static const char *social_stage_text(enum vs_social_stage_e stage)
       case VS_SOCIAL_STAGE_CLOSING:
         return "正在通知云端";
 
+      /* The minutes, not advice: the advice is the in-session line for an
+       * extreme moment, and this used to borrow its name.
+       */
+
       case VS_SOCIAL_STAGE_WAITING:
-        return "正在生成建议";
+        return "云端正在生成纪要";
 
       case VS_SOCIAL_STAGE_SAVING:
         return "正在保存记录";
@@ -1471,6 +1482,58 @@ static void social_stage(enum vs_social_stage_e stage)
     printf("%s: stage %s not shown, UI queue full\n", SOCIAL_TAG,
            social_stage_name(stage));
   }
+}
+
+/****************************************************************************
+ * Name: social_stage_detail
+ *
+ * Description:
+ *   Replace the finalizing page's line for the stage that is running with
+ *   what it has got to: uploads left, seconds the cloud has taken,
+ *   kilobytes of audio received.  A stage can last minutes, and one fixed
+ *   line for all of them looks the same as a hang.
+ *
+ *   Ignored unless stage is still the one running, so a worker that is a
+ *   step behind cannot put an old line back.  Posted once, with no retry:
+ *   a lost detail is replaced by the next one, and the stage events and
+ *   the result must not wait behind these for room in the UI's queue.  It
+ *   does not refresh the page's watchdog either; only a new stage does.
+ *
+ *   Not inlined, so the event on its stack is not reserved in the frame of
+ *   the upload workers that call it for the whole of their TLS calls.
+ *
+ ****************************************************************************/
+
+static void social_stage_detail(enum vs_social_stage_e stage,
+                                const char *fmt, ...)
+  noinline_function printf_like(2, 3);
+
+static void social_stage_detail(enum vs_social_stage_e stage,
+                                const char *fmt, ...)
+{
+  struct vs_app_event_s event;
+  va_list ap;
+  bool current;
+
+  pthread_mutex_lock(&g_social.lock);
+  current = g_social.stage == stage;
+  pthread_mutex_unlock(&g_social.lock);
+
+  if (!current)
+    {
+      return;
+    }
+
+  memset(&event, 0, sizeof(event));
+  event.type       = VS_APP_EVENT_SOCIAL_STAGE;
+  event.request_id = g_social.request_id;
+  event.stage      = stage;
+
+  va_start(ap, fmt);
+  vsnprintf(event.text, sizeof(event.text), fmt, ap);
+  va_end(ap);
+
+  (void)vs_app_post_event(&event);
 }
 
 /****************************************************************************
@@ -3506,9 +3569,53 @@ static bool social_upload_discard(struct social_slot_s *slot)
       printf("%s: %s, dropping the uploads still queued\n", SOCIAL_TAG,
              aborted ? "session aborted" :
                        "the stop is out of time for uploads");
+
+      /* After an abort nobody is looking at the page. */
+
+      if (!aborted)
+        {
+          social_stage_detail(VS_SOCIAL_STAGE_STOPPING,
+                              "网络较慢\n跳过未上传的数据");
+        }
     }
 
   return true;
+}
+
+/****************************************************************************
+ * Name: social_upload_begin / social_upload_end
+ *
+ * Description:
+ *   Bracket one transfer, keeping upload_busy.  Once the stop has begun --
+ *   it is waiting on exactly these -- begin also puts how many are left on
+ *   the finalizing page, which otherwise reads "正在停止采集" for however
+ *   long a slow link takes to empty the rings.
+ *
+ ****************************************************************************/
+
+static void social_upload_begin(void)
+{
+  unsigned int left;
+  bool stopping;
+
+  pthread_mutex_lock(&g_social.lock);
+  g_social.upload_busy++;
+  stopping = g_social.stop_capture;
+  left = g_social.audio.count + g_social.image.count + g_social.upload_busy;
+  pthread_mutex_unlock(&g_social.lock);
+
+  if (stopping)
+    {
+      social_stage_detail(VS_SOCIAL_STAGE_STOPPING,
+                          "正在上传剩余数据\n还剩 %u 项", left);
+    }
+}
+
+static void social_upload_end(void)
+{
+  pthread_mutex_lock(&g_social.lock);
+  g_social.upload_busy--;
+  pthread_mutex_unlock(&g_social.lock);
 }
 
 static void *social_upload_worker(void *arg)
@@ -3568,10 +3675,12 @@ static void *social_upload_worker(void *arg)
       packet.produced_ms = slot.stamp_ms;
 
       memset(&result, 0, sizeof(result));
+      social_upload_begin();
       began_ms = social_now_ms();
       ret = vs_cloud_social_upload(g_social.session.session_id, &packet,
                                    &result);
       spent_ms = social_now_ms() - began_ms;
+      social_upload_end();
 
       /* Released as soon as the transfer is over, success or not.  Holding it
        * any longer would keep a 160 KB frame in PSRAM for no reason, and the
@@ -5639,6 +5748,53 @@ static void social_minutes_dir(const char *path)
 }
 
 /****************************************************************************
+ * Name: social_fetch_progress
+ *
+ * Description:
+ *   The download's progress hook: kilobytes on the card so far and, once
+ *   the link has dropped a window, how many times it has resumed.  Called
+ *   once per TLS record, so it posts at most once per
+ *   SOCIAL_FETCH_DETAIL_MS -- except for a resume, which is the news and
+ *   goes out at once.
+ *
+ ****************************************************************************/
+
+#define SOCIAL_FETCH_DETAIL_MS 1000u
+
+struct social_fetch_progress_s
+{
+  uint64_t next_ms;
+  unsigned int resumes;
+};
+
+static void social_fetch_progress(void *arg, size_t written,
+                                  unsigned int resumes)
+{
+  struct social_fetch_progress_s *progress = arg;
+  uint64_t now = social_now_ms();
+
+  if (resumes == progress->resumes && now < progress->next_ms)
+    {
+      return;
+    }
+
+  progress->resumes = resumes;
+  progress->next_ms = now + SOCIAL_FETCH_DETAIL_MS;
+
+  if (resumes == 0)
+    {
+      social_stage_detail(VS_SOCIAL_STAGE_FETCHING,
+                          "正在接收语音\n已接收 %zu KB", written / 1024u);
+    }
+  else
+    {
+      social_stage_detail(VS_SOCIAL_STAGE_FETCHING,
+                          "正在接收语音\n已接收 %zu KB\n续传第 %u 次",
+                          written / 1024u, resumes);
+    }
+}
+
+/****************************************************************************
  * Name: social_fetch_minutes_audio
  *
  * Description:
@@ -5669,6 +5825,7 @@ static void social_minutes_dir(const char *path)
 static int social_fetch_minutes_audio(const char *url, const char *record_key,
                                       char *path_out, size_t path_cap)
 {
+  struct social_fetch_progress_s progress;
   char path[VS_TTS_PATH_MAX];
   char temp[VS_TTS_PATH_MAX];
   size_t file_len = 0;
@@ -5732,10 +5889,13 @@ static int social_fetch_minutes_audio(const char *url, const char *record_key,
   (void)unlink(temp);
 
   began = social_now_ms();
+  progress.next_ms = began + SOCIAL_FETCH_DETAIL_MS;
+  progress.resumes = 0;
   ret = vs_cloud_download_to_file(url, temp,
                                   CONFIG_VS_SOCIAL_DOWNLOAD_MAX_BYTES,
                                   CONFIG_VS_SOCIAL_DOWNLOAD_TIMEOUT_MS,
                                   social_download_cancelled,
+                                  social_fetch_progress, &progress,
                                   &file_len);
   if (ret < 0)
     {
@@ -5809,6 +5969,7 @@ static void social_collect_minutes(const char *msg_id)
   char audio[VS_TTS_PATH_MAX];
   char *body = NULL;
   bool body_psram = false;
+  uint64_t waited_from;
   uint64_t deadline;
   int ret;
 
@@ -5830,7 +5991,8 @@ static void social_collect_minutes(const char *msg_id)
    * press back again.
    */
 
-  deadline = social_now_ms() + CONFIG_VS_SOCIAL_FINALIZE_TIMEOUT_MS;
+  waited_from = social_now_ms();
+  deadline = waited_from + CONFIG_VS_SOCIAL_FINALIZE_TIMEOUT_MS;
 
   for (; ; )
     {
@@ -5843,6 +6005,18 @@ static void social_collect_minutes(const char *msg_id)
         {
           break;
         }
+
+      /* Each unanswered poll says how long this has been.  The wait grows
+       * with the length of the conversation -- about 19 s per minute of it
+       * on 2026-10-14 -- so a long session sits here for minutes, and a
+       * counting line is what tells the user it is the cloud working and
+       * not the device stuck.
+       */
+
+      social_stage_detail(VS_SOCIAL_STAGE_WAITING,
+                          "云端正在生成纪要\n已等待 %lu 秒",
+                          (unsigned long)((social_now_ms() - waited_from) /
+                                          1000u));
 
       pthread_mutex_lock(&g_social.lock);
       aborting = g_social.abort;
@@ -6424,6 +6598,7 @@ int vs_social_start(uint32_t request_id)
   g_social.dropped_drain  = 0;
   g_social.uploaded       = 0;
   g_social.upload_failed  = 0;
+  g_social.upload_busy    = 0;
   g_social.frames_malformed = 0;
 
   /* Start at the configured ceiling and let the link argue it down.

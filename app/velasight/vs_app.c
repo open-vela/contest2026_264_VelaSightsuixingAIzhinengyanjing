@@ -1454,16 +1454,17 @@ static void vs_snapshot(struct vs_runtime_s *runtime,
         snprintf(snapshot->content_title, sizeof(snapshot->content_title),
                  "整理记录");
 
-        /* The step that is actually running, falling back to the old fixed
-         * line only for the window before the first stage event lands.  The
-         * page used to say "正在生成建议" for the whole sequence, including
-         * while it was stopping the camera and while it was writing to the
-         * card -- neither of which is generating anything.
+        /* The step that is actually running and, once its worker has said,
+         * how far it has got; a neutral line only for the moment before the
+         * first stage event lands.  The page used to say "正在生成建议" for
+         * the whole sequence, including while it was stopping the camera
+         * and while it was writing to the card -- and what the cloud makes
+         * at the end is the minutes, not advice.
          */
 
         snprintf(snapshot->content_body, sizeof(snapshot->content_body), "%s",
                  runtime->social_stage_text[0] != '\0' ?
-                   runtime->social_stage_text : "正在生成建议");
+                   runtime->social_stage_text : "整理中");
         snprintf(snapshot->status_title, sizeof(snapshot->status_title), "整理中");
         snprintf(snapshot->status_value, sizeof(snapshot->status_value), "处理中");
         snprintf(snapshot->status_meta, sizeof(snapshot->status_meta), "请稍等");
@@ -2079,7 +2080,7 @@ static void vs_social_stage_timeout(struct vs_runtime_s *runtime)
             "社交记录整理无响应",
             "停止采集无响应",
             "云端关闭会话无响应",
-            "云端生成建议无响应",
+            "云端生成纪要无响应",
             "保存记录无响应",
             "接收语音无响应"
           };
@@ -2555,18 +2556,35 @@ static void vs_handle_app_event(struct vs_runtime_s *runtime,
         break;
 
       case VS_APP_EVENT_SOCIAL_STAGE:
-        if (runtime->page == VS_PAGE_SOCIAL_FINALIZING)
+
+        /* Two kinds arrive here: a stage starting, and a detail for the
+         * stage already running -- uploads left, seconds waited, kilobytes
+         * received.  Both replace the line; only a new stage touches the
+         * deadline.
+         *
+         * Cleared, not extended, on a new stage: the main loop re-arms it on
+         * the next pass with the budget that stage is entitled to, which is
+         * what makes this a no-progress timer rather than a total one.  A
+         * detail must not clear it, or a stage that keeps reporting how
+         * long it has waited would never time out.
+         *
+         * A detail from an earlier stage is dropped.  The upload workers
+         * post theirs from other threads, and one can lose the race to the
+         * session thread's next stage event; shown, it would put the page
+         * back on a step that has finished.
+         */
+
+        if (runtime->page == VS_PAGE_SOCIAL_FINALIZING &&
+            event->stage >= runtime->social_stage)
           {
-            runtime->social_stage = event->stage;
+            if (event->stage != runtime->social_stage)
+              {
+                runtime->social_stage = event->stage;
+                runtime->social_stage_until_ms = 0;
+              }
+
             snprintf(runtime->social_stage_text,
                      sizeof(runtime->social_stage_text), "%s", event->text);
-
-            /* Cleared, not extended: the main loop re-arms it on the next pass
-             * with the budget the new stage is entitled to.  That is what makes
-             * this a no-progress timer rather than a total one.
-             */
-
-            runtime->social_stage_until_ms = 0;
           }
         break;
 
@@ -2613,7 +2631,7 @@ static void vs_handle_app_event(struct vs_runtime_s *runtime,
               "社交记录整理失败",
               "停止采集失败",
               "云端关闭会话失败",
-              "云端未给出建议",
+              "云端未生成纪要",
               "保存记录失败",
               "接收语音失败"
             };

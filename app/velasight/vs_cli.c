@@ -591,7 +591,9 @@ static int cli_gesture(enum vs_key_e key, enum cli_gesture_e gesture,
  *   Wait until the page is in want (0), in fail (-EIO), or timeout_ms has
  *   passed (-ETIMEDOUT), leaving *st as the last status read.  A line is
  *   printed whenever the page or the finalize stage moves, so a long wait
- *   leaves a trail of what it went through.
+ *   leaves a trail of what it went through -- and on the finalizing page
+ *   whenever its line changes too, detail="...", so the trail also shows
+ *   the uploads counting down, the seconds waited and the audio arriving.
  *
  ****************************************************************************/
 
@@ -599,24 +601,46 @@ static int cli_wait(unsigned long want, unsigned long fail,
                     uint32_t timeout_ms, struct vs_app_status_s *st)
 {
   uint32_t deadline = cli_now_ms() + timeout_ms;
+  char last_body[VS_TEXT_LONG];
   int last_page = -1;
   int last_stage = -1;
   int ret;
 
+  last_body[0] = '\0';
+
   for (; ; )
     {
+      bool finalizing;
+
       ret = cli_read(st);
       if (ret < 0)
         {
           return ret;
         }
 
-      if ((int)st->page != last_page || (int)st->social_stage != last_stage)
+      finalizing = st->page == VS_PAGE_SOCIAL_FINALIZING;
+
+      if ((int)st->page != last_page ||
+          (int)st->social_stage != last_stage ||
+          (finalizing && strcmp(st->content_body, last_body) != 0))
         {
+          char line[CLI_LINE / 2];
+          size_t len = 0;
+
           last_page  = (int)st->page;
           last_stage = (int)st->social_stage;
-          printf("vs_cli: page %s stage %s\n", cli_page_name(st->page),
-                 cli_stage_name(st->social_stage));
+          snprintf(last_body, sizeof(last_body), "%s", st->content_body);
+
+          line[0] = '\0';
+          cli_cat(line, sizeof(line), &len, "vs_cli: page %s stage %s",
+                  cli_page_name(st->page), cli_stage_name(st->social_stage));
+          if (finalizing)
+            {
+              cli_cat_quoted(line, sizeof(line), &len, "detail",
+                             st->content_body);
+            }
+
+          printf("%s\n", line);
         }
 
       if ((CLI_PAGE(st->page) & want) != 0)

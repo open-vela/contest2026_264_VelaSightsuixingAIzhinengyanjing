@@ -939,6 +939,12 @@ void vs_cloud_release(unsigned char *data, bool from_psram);
  *                Called from the transport's thread, so it must be cheap and
  *                must not reach for a lock the aborting thread could be
  *                holding across its own call into this download.
+ *   progress   - optional; told the bytes on the card so far after every
+ *                record, and the number of resumes so far whenever a
+ *                window that stalled is asked for again.  For a caller that
+ *                shows the transfer to someone; the same thread and the
+ *                same rules as cancel, and it has to rate-limit itself.
+ *   progress_arg - passed to progress unchanged.
  *   len        - optional; receives the bytes written.
  *
  * Returned Value:
@@ -965,6 +971,9 @@ void vs_cloud_release(unsigned char *data, bool from_psram);
 int vs_cloud_download_to_file(const char *url, const char *path,
                               size_t max_bytes, uint32_t timeout_ms,
                               bool (*cancel)(void),
+                              void (*progress)(void *arg, size_t written,
+                                               unsigned int resumes),
+                              void *progress_arg,
                               size_t *len);
 
 /****************************************************************************
