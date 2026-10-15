@@ -83,6 +83,11 @@ int bk7258_bt_gatt_test_initialize(void);
 #  include "bk7258_jpeg_enc.h"
 #endif
 
+#ifdef CONFIG_BK7258_SARADC
+#  include <nuttx/analog/adc.h>
+#  include "bk7258_saradc.h"
+#endif
+
 #define BK7258_LINK_WAIT_MS 8000u
 
 int bk7258_pwc_start(void);
@@ -151,6 +156,47 @@ static void bk7258_bt_bringup(void)
 #ifdef CONFIG_BK7258_SDIO
 int bk7258_mmcsd_initialize(void);
 int bk7258_mmcsd_schedule(unsigned int delay_ms);
+#endif
+
+#ifdef CONFIG_BK7258_SARADC
+/****************************************************************************
+ * Name: bk7258_saradc_bringup
+ *
+ * Description:
+ *   Register the SARADC's VBAT channel as /dev/adc0.  VBAT alone: it needs
+ *   no pin, unlike every external channel on this board, and it is what the
+ *   battery reading is built on.  Best-effort, and no hardware is touched
+ *   here -- the block is the CP's between conversions, see bk7258_saradc.c.
+ *
+ ****************************************************************************/
+
+static void bk7258_saradc_bringup(void)
+{
+  static const uint8_t chanlist[] =
+  {
+    BK7258_SARADC_CH_VBAT
+  };
+
+  struct adc_dev_s *adc;
+  int ret;
+
+  adc = bk7258_saradc_initialize(chanlist, sizeof(chanlist));
+  if (adc == NULL)
+    {
+      printf("saradc: no device, battery reading unavailable\n");
+      return;
+    }
+
+  ret = adc_register("/dev/adc0", adc);
+  if (ret < 0)
+    {
+      printf("saradc: /dev/adc0 registration failed, error=%d\n", ret);
+      return;
+    }
+
+  printf("saradc: /dev/adc0 registered, channel %u (VBAT)\n",
+         BK7258_SARADC_CH_VBAT);
+}
 #endif
 
 int bk7258_bringup(void)
@@ -539,6 +585,15 @@ void board_late_initialize(void)
    */
 
   (void)bk7258_jpeg_enc_initialize();
+#endif
+
+#ifdef CONFIG_BK7258_SARADC
+  /* Late, with the other best-effort devices: nothing at boot reads it, and
+   * the driver's state is allocated, which from here comes out of a heap
+   * PSRAM has already joined rather than the boot-time SRAM one.
+   */
+
+  bk7258_saradc_bringup();
 #endif
 
   /* Configuration that survives a reset.  Deliberately after the display and

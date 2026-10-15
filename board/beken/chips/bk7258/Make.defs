@@ -25,6 +25,10 @@ ifeq ($(CONFIG_BK7258_SDIO),y)
 CHIP_CSRCS += bk7258_sdio.c
 endif
 
+ifeq ($(CONFIG_BK7258_SARADC),y)
+CHIP_CSRCS += bk7258_saradc.c
+endif
+
 CHIP_CSRCS += bk7258_psram.c
 CHIP_CSRCS += bk7258_allocateheap.c
 CHIP_CSRCS += bk7258_qspi.c

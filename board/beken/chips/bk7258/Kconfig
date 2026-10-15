@@ -67,6 +67,23 @@ config BK7258_TRNG
 		CONFIG_DEV_URANDOM_RANDOM_POOL so that /dev/urandom is the pool --
 		which this driver then seeds from hardware.
 
+config BK7258_SARADC
+	bool "BK7258 SARADC (/dev/adc0)"
+	default n
+	depends on ADC
+	help
+		Drive the general-purpose SARADC -- not the audio ADC, which is a
+		different block -- as a NuttX ADC lower half, and register its
+		internal VBAT channel as /dev/adc0 late in bring-up.  Each
+		ANIOC_TRIGGER is one polled conversion, about 5 ms, during which
+		the caller sleeps.
+
+		The CP owns this block in the vendor design and measures VBAT and
+		the die temperature with it every 15 s (every second for the first
+		30 s), without announcing it.  The driver therefore converts only
+		while the CP is visibly idle and drops any reading the CP may have
+		overlapped; see the header of bk7258_saradc.c.
+
 config BK7258_WIFI
 	bool "BK7258 AP Wi-Fi IPC driver"
 	default y

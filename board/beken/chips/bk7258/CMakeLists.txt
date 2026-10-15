@@ -41,6 +41,10 @@ if(CONFIG_BK7258_TRNG)
   list(APPEND SRCS bk7258_trng.c)
 endif()
 
+if(CONFIG_BK7258_SARADC)
+  list(APPEND SRCS bk7258_saradc.c)
+endif()
+
 if(CONFIG_BK7258_BLUETOOTH)
   list(APPEND SRCS bk7258_bt_transport.c bk7258_bt_driver.c)
 
