@@ -1184,7 +1184,7 @@ static int tls_do_request(
             if (sink != NULL && (got > 0 || ret == VELA_TLS_ERR_SINK ||
                     ret == VELA_TLS_ERR_PROTOCOL)) {
                 pool_release(slot, host, port, false);
-                return ret;
+                return tls_bounded_error(ret, began, timeout_ms);
             }
         }
 
@@ -1312,6 +1312,27 @@ int vela_https_request_stream(
 
     return tls_do_request(host, port, method, path, headers, body, body_len,
         NULL, 0, out_body_len, sink, sink_arg, 0);
+}
+
+int vela_https_request_stream_bounded(
+    const char* host,
+    const char* port,
+    const char* method,
+    const char* path,
+    const vela_header_t* headers,
+    const char* body,
+    size_t body_len,
+    vela_body_sink_t sink,
+    void* sink_arg,
+    size_t* out_body_len,
+    unsigned int timeout_ms)
+{
+    if (sink == NULL) {
+        return VELA_TLS_ERR_SINK;
+    }
+
+    return tls_do_request(host, port, method, path, headers, body, body_len,
+        NULL, 0, out_body_len, sink, sink_arg, timeout_ms);
 }
 
 int vela_https_get(const char* host, const char* port, const char* path,

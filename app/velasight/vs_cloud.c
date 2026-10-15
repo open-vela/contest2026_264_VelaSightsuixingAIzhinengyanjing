@@ -2073,14 +2073,12 @@ static int cloud_plain_http(const struct cloud_url_s *url, const char *method,
  *   vela_tls.c reports its own error space (VELA_TLS_ERR_*); everything past
  *   this point sees HTTP status codes and negative errnos only.
  *
- *   timeout_ms bounds every wait of a buffered TLS exchange; see
- *   vela_https_request_bounded().  0 keeps vela_tls.c's defaults, which
+ *   timeout_ms bounds every wait of a TLS exchange, buffered or streamed;
+ *   see vela_https_request_bounded().  0 keeps vela_tls.c's defaults, which
  *   let a receive wait two minutes and a send for as long as TCP keeps
  *   retransmitting.  The cleartext path is bounded already, by
  *   CONFIG_VS_SOCIAL_CONNECT_TIMEOUT_MS and CONFIG_VS_SOCIAL_IO_TIMEOUT_MS
- *   in cloud_connect().  The streaming path keeps the defaults: the
- *   spoken-minutes download behind it enforces its own deadline, from its
- *   sink and between Range windows; see vs_cloud_download_to_file().
+ *   in cloud_connect().
  *
  ****************************************************************************/
 
@@ -2101,9 +2099,11 @@ static int cloud_http_ex(const struct cloud_url_s *url, const char *method,
 
   if (sink != NULL)
     {
-      ret = vela_https_request_stream(url->host, url->port, method, url->path,
-                                      headers, (const char *)body, body_len,
-                                      sink, sink_arg, resp_len);
+      ret = vela_https_request_stream_bounded(url->host, url->port, method,
+                                              url->path, headers,
+                                              (const char *)body, body_len,
+                                              sink, sink_arg, resp_len,
+                                              timeout_ms);
     }
   else
     {
@@ -5579,9 +5579,19 @@ int vs_cloud_download_to_file(const char *url, const char *path,
           headers[0].value = range;
         }
 
+      /* Bounded at CONFIG_VS_SOCIAL_IO_TIMEOUT_MS of silence, so a window
+       * that stops arriving fails in seconds and the next one resumes from
+       * what landed.  With vela_tls.c's defaults the read waited out its
+       * 120 s instead, and by then the deadline above refused the resume:
+       * measured 2026-10-14, three of thirteen spoken-minutes downloads
+       * stalled part way through a window, and each held the result page
+       * back by one to three minutes before giving up with no audio.
+       */
+
       http = cloud_http_ex(parsed, "GET", window != 0 ? headers : NULL, NULL,
                            0, scratch, CONFIG_VS_SOCIAL_REG_RESP_BYTES, NULL,
-                           cloud_file_sink, &sink, 0);
+                           cloud_file_sink, &sink,
+                           CONFIG_VS_SOCIAL_IO_TIMEOUT_MS);
       got = sink.written - before;
       requests++;
 

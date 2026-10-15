@@ -162,6 +162,32 @@ int vela_https_request_stream(
 );
 
 /**
+ * vela_https_request_stream() with every network wait bounded by timeout_ms,
+ * as vela_https_request_bounded() describes.
+ *
+ * For a download that can resume: a body that stops arriving fails after
+ * timeout_ms of silence with VELA_TLS_ERR_TIMEOUT, instead of holding the
+ * caller for the default receive timeout, and the caller can ask for the
+ * rest.  The bound is on silence, not on the transfer: a body that keeps
+ * arriving, however slowly, is not cut off.
+ *
+ * @param timeout_ms  Per-wait bound.  0 behaves as vela_https_request_stream().
+ */
+int vela_https_request_stream_bounded(
+    const char       *host,
+    const char       *port,
+    const char       *method,
+    const char       *path,
+    const vela_header_t *headers,
+    const char       *body,
+    size_t            body_len,
+    vela_body_sink_t  sink,
+    void             *sink_arg,
+    size_t           *out_body_len,
+    unsigned int      timeout_ms
+);
+
+/**
  * Convenience wrapper for GET with no extra headers or body.
  */
 int vela_https_get(const char *host, const char *port, const char *path,
