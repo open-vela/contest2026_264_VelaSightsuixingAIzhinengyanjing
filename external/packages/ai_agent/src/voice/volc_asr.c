@@ -1028,7 +1028,9 @@ static int recv_volc_response(asr_tls_ctx_t* ctx,
         uint32_t msg_size = read_be32(buf, volc_hdr_len + 4);
         size_t msg_off = volc_hdr_len + 8;
 
-        if (msg_off + msg_size > flen) {
+        /* msg_size comes off the wire: compare by subtraction so a huge
+         * value cannot wrap the sum past flen (upstream 4bcbd2a). */
+        if (msg_size > flen - msg_off) {
             msg_size = (uint32_t)(flen - msg_off);
         }
 
@@ -1061,7 +1063,9 @@ static int recv_volc_response(asr_tls_ctx_t* ctx,
     uint32_t payload_len = read_be32(buf, volc_hdr_len);
     size_t data_off = volc_hdr_len + 4;
 
-    if (data_off + payload_len > flen) {
+    /* Same wrap-safe form as above; the check before guarantees
+     * flen >= data_off. */
+    if (payload_len > flen - data_off) {
         syslog(LOG_ERR,
             "[%s] Payload overrun: off=%zu + plen=%lu "
             "> flen=%zu\n",
@@ -1076,9 +1080,11 @@ static int recv_volc_response(asr_tls_ctx_t* ctx,
         return 0; /* skip unknown message types */
     }
 
-    /* Parse JSON payload */
-    buf[data_off + payload_len] = '\0';
-    cJSON* root = cJSON_Parse((char*)(buf + data_off));
+    /* Parse a bounded payload.  ws_recv_frame() accepts a frame that fills
+     * all WS_BUF_SIZE bytes, so NUL-terminating it in place would write one
+     * byte past the allocation (upstream 4bcbd2a). */
+    cJSON* root = cJSON_ParseWithLength(
+        (const char*)(buf + data_off), payload_len);
 
     free(buf);
     buf = NULL;

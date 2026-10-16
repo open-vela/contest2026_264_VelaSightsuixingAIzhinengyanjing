@@ -1501,7 +1501,9 @@ config VS_BATTERY_POLL_MS
 		as soon as it starts.  A reading is the median of three
 		conversions, about 15 ms on the UI thread, and one console line.
 		The value is published with the status ("velasight status" prints
-		it as bat=) and not drawn on either screen yet.
+		it as bat=), and the photo-question page shows the percentage at
+		the top of the right screen, so this is also how often that
+		figure can change.
 
 config VS_SOCIAL_ADVICE_TIMEOUT_MS
 	int "VelaSight social advice wait (ms)"
