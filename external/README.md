@@ -60,7 +60,7 @@ The installer is intentionally conservative:
 | --- | --- |
 | `apps` | `dcc6a95c3b323e533c98fde8fb209f99e24f0fdd` |
 | `nuttx` | `4a67a7bad6bba672db2ac37a64acbdc3c024d6e5` |
-| `packages/ai_agent` | `31faed70f683a6f5e690437c5507891360f0814a` |
+| `packages/ai_agent` | `e65550f18759f086d7f544edcf17d1e31223244f` |
 | `bk_avdk_smp` | `d2ded037798530175e5dc5cde6fa1878f5d5ef35` |
 
 The complete Armino overlay includes both partition inputs:
