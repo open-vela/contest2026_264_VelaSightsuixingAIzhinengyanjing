@@ -516,8 +516,9 @@ struct vs_runtime_s
   uint32_t inputs_handled;
 
   /* The last battery reading and when to take the next.  Published with the
-   * status, not drawn yet: vs_snapshot() keeps battery_present false.
-   * battery_mv stays 0 until the first reading lands.
+   * status, and drawn on one page: the photo-question page's right screen
+   * shows the percentage as its title, see vs_snapshot().  battery_mv stays
+   * 0 until the first reading lands.
    */
 
   uint32_t battery_next_ms;
@@ -1135,7 +1136,7 @@ static void vs_snapshot(struct vs_runtime_s *runtime,
   snapshot->error_retryable = runtime->error_retryable;
   snapshot->wifi_ready = runtime->network.state == VS_NET_STA_READY ||
                          runtime->network.state == VS_NET_AP_READY;
-  snapshot->battery_present = false;
+  snapshot->battery_present = runtime->battery_mv != 0;
   /* UI snapshots are a latency-sensitive hot path.  Never read SD-NAND here;
    * persistent state must be loaded by startup or background event handling. */
   snapshot->api_ready = runtime->api_ready;
@@ -1279,7 +1280,26 @@ static void vs_snapshot(struct vs_runtime_s *runtime,
         snprintf(snapshot->content_body, sizeof(snapshot->content_body),
                  "拍一张照片\n然后直接问我");
         snapshot->content_meta[0] = '\0';
-        snprintf(snapshot->status_title, sizeof(snapshot->status_title), "AI");
+
+        /* The battery, digits and a percent sign only, in the row that used
+         * to say "AI": the left screen's 拍照提问 and the 照片问答 below
+         * already name the page.  "--%" until the first reading lands, and
+         * in a build without the SARADC, so the row keeps its shape and
+         * never shows a number nobody measured.  The figure is an estimate
+         * from the voltage; see vs_battery.h.
+         */
+
+        if (snapshot->battery_present)
+          {
+            snprintf(snapshot->status_title, sizeof(snapshot->status_title),
+                     "%u%%", (unsigned int)runtime->battery_percent);
+          }
+        else
+          {
+            snprintf(snapshot->status_title, sizeof(snapshot->status_title),
+                     "--%%");
+          }
+
         snprintf(snapshot->status_value, sizeof(snapshot->status_value),
                  "照片问答");
         snprintf(snapshot->status_meta, sizeof(snapshot->status_meta),
@@ -4049,7 +4069,10 @@ int vs_app_run(void)
         }
 
 #ifdef CONFIG_BK7258_SARADC
-      /* Rendered only to publish it; nothing on either screen changes. */
+      /* Rendered to publish it, and for the photo-question page, whose right
+       * screen shows the percentage.  On every other page nothing on either
+       * screen changes.
+       */
 
       if ((int32_t)(vs_app_now_ms() - runtime.battery_next_ms) >= 0)
         {
